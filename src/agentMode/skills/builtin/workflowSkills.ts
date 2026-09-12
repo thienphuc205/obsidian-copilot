@@ -10,7 +10,7 @@ import type { BuiltinSkill } from "./builtinSkills";
 
 const ENABLED_AGENTS = ["claude", "codex", "opencode"] as const;
 
-const WEB_SEARCH_VERSION = 1;
+const WEB_SEARCH_VERSION = 2;
 
 export const WEB_SEARCH_SKILL: BuiltinSkill = {
   name: "web-search",
@@ -18,7 +18,7 @@ export const WEB_SEARCH_SKILL: BuiltinSkill = {
   enabledAgents: ENABLED_AGENTS,
   skillMd: `---
 name: web-search
-description: Search the web through the plugin's self-host search channel (the provider and API key configured in Copilot settings, e.g. Firecrawl/Tavily/Exa). Use for any web-search intent when the session provides the self-host search channel.
+description: Web search via the plugin's self-host search channel (user's Firecrawl/Tavily/Exa key). Use for any web-search intent.
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "\${WEB_SEARCH_VERSION}"
@@ -55,7 +55,7 @@ The response is JSON: \`results\` (array of \`{ title, url, snippet/content, pub
   files: [],
 };
 
-const READ_SCANNED_PDF_VERSION = 1;
+const READ_SCANNED_PDF_VERSION = 2;
 
 export const READ_SCANNED_PDF_SKILL: BuiltinSkill = {
   name: "read-scanned-pdf",
@@ -63,7 +63,7 @@ export const READ_SCANNED_PDF_SKILL: BuiltinSkill = {
   enabledAgents: ENABLED_AGENTS,
   skillMd: `---
 name: read-scanned-pdf
-description: Extract text from scanned/image-only PDFs by rasterizing pages locally and reading them with your vision. Use when a PDF reports no text layer.
+description: OCR a scanned/image-only PDF locally: rasterize pages and read them with vision. Use when a PDF reports no text layer.
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "${READ_SCANNED_PDF_VERSION}"
@@ -94,7 +94,7 @@ Summarize first; full transcription only if asked.
   files: [],
 };
 
-const RESEARCH_VERSION = 1;
+const RESEARCH_VERSION = 2;
 
 export const RESEARCH_SKILL: BuiltinSkill = {
   name: "research",
@@ -102,7 +102,7 @@ export const RESEARCH_SKILL: BuiltinSkill = {
   enabledAgents: ENABLED_AGENTS,
   skillMd: `---
 name: research
-description: Structured research workflow. Plans sub-queries, gathers vault and web evidence, cross-checks conflicts, writes a sourced research note. Use for research/compare requests.
+description: Research workflow — plan, gather vault+web evidence, cross-check, write a sourced note. Use for research/compare requests.
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "${RESEARCH_VERSION}"
@@ -130,7 +130,7 @@ source the user can open.
   files: [],
 };
 
-const STUDY_QUIZ_VERSION = 1;
+const STUDY_QUIZ_VERSION = 2;
 
 export const STUDY_QUIZ_SKILL: BuiltinSkill = {
   name: "study-quiz",
@@ -138,7 +138,7 @@ export const STUDY_QUIZ_SKILL: BuiltinSkill = {
   enabledAgents: ENABLED_AGENTS,
   skillMd: `---
 name: study-quiz
-description: Quiz the user on the material attached in this session — notes, PDFs, excerpts — one question at a time, then log every miss into a gaps note. Use for "quiz me on this", "test me", or any request to be quizzed on their material.
+description: Interactive quiz on attached material, one question at a time; misses logged to Study/Gaps.md. Use for "quiz me".
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "${STUDY_QUIZ_VERSION}"
@@ -201,7 +201,7 @@ follow-up action: retry the missed items, or study the linked notes.
   files: [],
 };
 
-const FEYNMAN_GRADE_VERSION = 1;
+const FEYNMAN_GRADE_VERSION = 2;
 
 export const FEYNMAN_GRADE_SKILL: BuiltinSkill = {
   name: "feynman-grade",
@@ -209,7 +209,7 @@ export const FEYNMAN_GRADE_SKILL: BuiltinSkill = {
   enabledAgents: ENABLED_AGENTS,
   skillMd: `---
 name: feynman-grade
-description: Grade the user's own explanation of a concept like a strict but fair teacher — name what is solid, quote each gap and ask one why/how follow-up, and link related vault notes. Use for "grade my explanation" or Feynman-technique practice.
+description: Grade the user's explanation of a concept, quote gaps, ask follow-ups, link vault notes. Use for Feynman practice.
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "${FEYNMAN_GRADE_VERSION}"
@@ -236,7 +236,7 @@ answer after attempting it themselves.
   files: [],
 };
 
-const DEFENSE_SIM_VERSION = 1;
+const DEFENSE_SIM_VERSION = 2;
 
 export const DEFENSE_SIM_SKILL: BuiltinSkill = {
   name: "defense-sim",
@@ -244,7 +244,7 @@ export const DEFENSE_SIM_SKILL: BuiltinSkill = {
   enabledAgents: ENABLED_AGENTS,
   skillMd: `---
 name: defense-sim
-description: Run a graduate-committee simulation over the user's attached research, proposal, or research-plan notes — rounds on contribution, related work, method, and validity/ethics, ending in a scorecard and a gaps-note log. Use for mock defense, defense rehearsal, or "simulate my committee".
+description: Committee-style defense simulation over attached research notes: contribution, method, validity, scorecard. Use for mock defense.
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "${DEFENSE_SIM_VERSION}"
@@ -282,7 +282,7 @@ material" and move on.
   files: [],
 };
 
-const PAPER_COMPANION_VERSION = 1;
+const PAPER_COMPANION_VERSION = 2;
 
 export const PAPER_COMPANION_SKILL: BuiltinSkill = {
   name: "paper-companion",
@@ -290,7 +290,7 @@ export const PAPER_COMPANION_SKILL: BuiltinSkill = {
   enabledAgents: ENABLED_AGENTS,
   skillMd: `---
 name: paper-companion
-description: Guided study of an attached paper (PDF or excerpt) — comprehension checks first, then method-focused critique, ending with a critique skeleton the user can paste into their notes. Use for "study this paper", paper reading, or paper critique requests.
+description: Paper study companion: comprehension checks then method critique with page citations. Use for "study this paper".
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "${PAPER_COMPANION_VERSION}"
@@ -327,7 +327,7 @@ report.
   files: [],
 };
 
-const YOUTUBE_NOTES_VERSION = 1;
+const YOUTUBE_NOTES_VERSION = 2;
 
 export const YOUTUBE_NOTES_SKILL: BuiltinSkill = {
   name: "youtube-notes",
@@ -335,7 +335,7 @@ export const YOUTUBE_NOTES_SKILL: BuiltinSkill = {
   enabledAgents: ENABLED_AGENTS,
   skillMd: String.raw`---
 name: youtube-notes
-description: Turn a shared YouTube lecture into a structured vault note — TL;DR, grouped key points with rough timestamps, definitions, self-check questions, and the source link. Use when the user shares a YouTube URL and wants it studied or turned into notes.
+description: Turn a YouTube URL into a structured lecture note via the self-host transcript channel.
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "${YOUTUBE_NOTES_VERSION}"
@@ -398,7 +398,7 @@ After writing the note, offer one follow-up: "want a quiz on this lecture?
   files: [],
 };
 
-const READ_FILES_VERSION = 1;
+const READ_FILES_VERSION = 2;
 
 export const READ_FILES_SKILL: BuiltinSkill = {
   name: "read-files",
@@ -406,7 +406,7 @@ export const READ_FILES_SKILL: BuiltinSkill = {
   enabledAgents: ENABLED_AGENTS,
   skillMd: String.raw`---
 name: read-files
-description: Extract text locally from office files (.docx, .ppt, .pptx) and read keyframes from local video files (mp4/mov/mkv/webm) before answering, so attached material is never skipped. Use whenever the session includes such a file.
+description: Extract text from docx/ppt/pptx and keyframes from local video files locally.
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "${READ_FILES_VERSION}"

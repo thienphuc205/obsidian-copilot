@@ -69,7 +69,7 @@ export const BUILTIN_SKILLS: readonly BuiltinSkill[] = [
   ...OBSIDIAN_SKILLS,
 ];
 
-const MIYO_SEARCH_VERSION = 4;
+const MIYO_SEARCH_VERSION = 5;
 const MIYO_PARSE_VERSION = 1;
 
 /** Shared by both Miyo wrappers; the host script must define `die` before it. */
@@ -225,7 +225,7 @@ export const MIYO_SEARCH_SKILL: BuiltinSkill = {
   enabledAgents: ["claude", "codex", "opencode"],
   skillMd: `---
 name: miyo-search
-description: Semantic (meaning-based) search over the user's Obsidian vault via the local Miyo app. For any vault-search intent, use it when builtin grep search is too slow or doesn't surface enough relevant notes, or when the user explicitly asks for Miyo search. Needs the Miyo desktop app installed and running.
+description: Semantic vault search via the local Miyo app. Use for vault-search intent when grep is too slow or misses meaning.
 metadata:
   copilot-enabled-agents: claude, codex, opencode
   copilot-builtin-version: "${MIYO_SEARCH_VERSION}"

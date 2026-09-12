@@ -75,7 +75,7 @@ describe("builtinSkills", () => {
       const md = MIYO_SEARCH_SKILL.skillMd;
       // The description is the agent's primary "when to use" signal.
       expect(md).toMatch(/description:[^\n]*too slow/i);
-      expect(md).toMatch(/description:[^\n]*explicitly asks for Miyo search/i);
+      expect(md).toMatch(/description:[^\n]*vault-search intent/i);
       // The body reinforces the same triggers.
       expect(md).toMatch(/When to use it/);
       expect(md).toMatch(/doesn't surface enough relevant notes/i);
