@@ -106,6 +106,8 @@ export interface CopilotSettings {
   strictContextScope: boolean;
   /** Agent filesystem sandbox: "off" or "selected-context" (scope to the selection). */
   agentScopeMode: "off" | "selected-context";
+  /** Study mode: "off" or "socratic" (agent guides with questions, never direct answers). */
+  studyMode: "off" | "socratic";
   customPromptsFolder: string;
   chatNoteContextPath: string;
   chatNoteContextTags: string[];
@@ -955,6 +957,9 @@ export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
   }
   if (sanitizedSettings.agentScopeMode !== "selected-context") {
     sanitizedSettings.agentScopeMode = DEFAULT_SETTINGS.agentScopeMode;
+  }
+  if (sanitizedSettings.studyMode !== "socratic") {
+    sanitizedSettings.studyMode = DEFAULT_SETTINGS.studyMode;
   }
   if (typeof sanitizedSettings.enableImageAutoIndex !== "boolean") {
     sanitizedSettings.enableImageAutoIndex = DEFAULT_SETTINGS.enableImageAutoIndex;

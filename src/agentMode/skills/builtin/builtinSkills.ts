@@ -1,6 +1,13 @@
 import type { BackendId } from "@/agentMode/session/types";
 import { OBSIDIAN_SKILLS } from "./obsidianSkills";
-import { READ_SCANNED_PDF_SKILL, RESEARCH_SKILL } from "./workflowSkills";
+import {
+  DEFENSE_SIM_SKILL,
+  FEYNMAN_GRADE_SKILL,
+  PAPER_COMPANION_SKILL,
+  READ_SCANNED_PDF_SKILL,
+  RESEARCH_SKILL,
+  STUDY_QUIZ_SKILL,
+} from "./workflowSkills";
 
 /**
  * Plugin-shipped ("builtin") Agent Mode skills. Unlike user-authored skills,
@@ -47,6 +54,10 @@ export const SELF_HOST_WEB_SEARCH_TOKEN_ENV = "COPILOT_SELF_HOST_WEB_SEARCH_TOKE
 export const BUILTIN_SKILLS: readonly BuiltinSkill[] = [
   RESEARCH_SKILL,
   READ_SCANNED_PDF_SKILL,
+  STUDY_QUIZ_SKILL,
+  FEYNMAN_GRADE_SKILL,
+  DEFENSE_SIM_SKILL,
+  PAPER_COMPANION_SKILL,
   ...OBSIDIAN_SKILLS,
 ];
 

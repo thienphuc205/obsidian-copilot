@@ -14,6 +14,7 @@ import {
   COPILOT_INSTRUCTION_PRECEDENCE,
   COPILOT_PROJECT_WORKSPACE_POLICY,
   COPILOT_PROMPT_BASE,
+  SOCRATIC_STEERING,
 } from "./agentSystemPrompt";
 
 jest.mock("@/logger", () => ({
@@ -128,6 +129,27 @@ describe("agentSystemPrompt", () => {
       setDisableBuiltinSystemPrompt(true);
       const prompt = buildAgentSystemPrompt();
       expect(prompt).not.toContain(COPILOT_MIYO_SEARCH_STEERING);
+    });
+
+    it("omits the Socratic steering while study mode is off", () => {
+      updateSetting("studyMode", "off");
+      expect(buildAgentSystemPrompt()).not.toContain(SOCRATIC_STEERING);
+    });
+
+    it("appends the Socratic steering when study mode is socratic", () => {
+      updateSetting("studyMode", "socratic");
+      const prompt = buildAgentSystemPrompt();
+      expect(prompt).toContain(SOCRATIC_STEERING);
+      // The tutoring contract: one guiding question, hint-first, no full answer.
+      expect(prompt).toMatch(/ONE guiding question at a time/i);
+      expect(prompt).toMatch(/smallest possible hint/i);
+      expect(prompt).toMatch(/never the full answer/i);
+    });
+
+    it("suppresses the Socratic steering when the builtin prompt is disabled", () => {
+      updateSetting("studyMode", "socratic");
+      setDisableBuiltinSystemPrompt(true);
+      expect(buildAgentSystemPrompt()).not.toContain(SOCRATIC_STEERING);
     });
 
     it("never copies user-authored project instructions or context payloads", () => {

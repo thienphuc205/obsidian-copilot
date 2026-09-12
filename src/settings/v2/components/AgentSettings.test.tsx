@@ -3,7 +3,7 @@ const mockAuthStatuses: Record<string, BackendAuthStatus | null> = {};
 import { OpencodeAbsentInstallActions } from "@/agentMode/backends/opencode/OpencodeInlineInstall";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import React from "react";
-import { setSettings } from "@/settings/model";
+import { setSettings, updateSetting } from "@/settings/model";
 import { playNotificationSound } from "@/utils/notificationSound";
 import { AgentSettings } from "./AgentSettings";
 
@@ -48,6 +48,7 @@ let mockSettings: {
     notificationSound: boolean;
     notificationSoundId: string;
   };
+  studyMode: "off" | "socratic";
   enableSelfHostMode: boolean;
   enableAgentWebTools: boolean;
   agentWebSearchProvider: "firecrawl";
@@ -195,6 +196,7 @@ describe("AgentSettings", () => {
         notificationSound: true,
         notificationSoundId: "piano",
       },
+      studyMode: "off",
       enableSelfHostMode: false,
       enableAgentWebTools: false,
       agentWebSearchProvider: "firecrawl",
@@ -298,6 +300,14 @@ describe("AgentSettings", () => {
 
     expect(screen.queryByText("Sound")).toBeNull();
     expect(screen.getByText("Notification")).not.toBeNull();
+  });
+
+  it("persists the study mode pick through updateSetting", () => {
+    render(<AgentSettings />);
+
+    fireEvent.change(screen.getByDisplayValue("Off"), { target: { value: "socratic" } });
+
+    expect(updateSetting).toHaveBeenCalledWith("studyMode", "socratic");
   });
 
   it("shows the first backend's content by default and the default-model picker above the model list", () => {

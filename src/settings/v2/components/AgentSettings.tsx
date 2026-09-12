@@ -130,6 +130,20 @@ export const AgentSettings: React.FC = () => {
             { label: "Strict — selected context only", value: "selected-context" },
           ]}
         />
+        <SettingItem
+          type="select"
+          title="Study mode"
+          description="Socratic: the agent guides you with questions instead of direct answers — great for studying concepts."
+          value={settings.studyMode}
+          onChange={(value) => {
+            if (value !== "off" && value !== "socratic") return;
+            updateSetting("studyMode", value);
+          }}
+          options={[
+            { label: "Off", value: "off" },
+            { label: "Socratic tutor", value: "socratic" },
+          ]}
+        />
         <AgentNotificationSoundSettings
           enabled={settings.agentMode.notificationSound}
           onEnabledChange={(enabled) =>

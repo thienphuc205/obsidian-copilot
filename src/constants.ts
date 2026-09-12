@@ -757,6 +757,7 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   autoAddActiveContentToContext: true,
   strictContextScope: false,
   agentScopeMode: "off",
+  studyMode: "off",
   defaultOpenArea: DEFAULT_OPEN_AREA.VIEW,
   defaultSendShortcut: SEND_SHORTCUT.ENTER,
   customPromptsFolder: DEFAULT_CUSTOM_PROMPTS_FOLDER,

@@ -14,8 +14,9 @@
  *      Then document steering selected by `docProcessorBackend` (the local
  *      fail-closed block only when the user picked Miyo), followed by
  *      `COPILOT_MIYO_SEARCH_STEERING` — appended only when the dedicated
- *      Miyo search-skill setting is enabled. Task-planning guidance follows as
- *      another internal behavior layer.
+ *      Miyo search-skill setting is enabled — and `SOCRATIC_STEERING`,
+ *      appended only when Study mode is set to Socratic. Task-planning
+ *      guidance follows as another internal behavior layer.
  *   2. `COPILOT_PROJECT_WORKSPACE_POLICY`, `COPILOT_INSTRUCTION_PRECEDENCE`, and
  *      the pill-syntax directive (`buildPillSyntaxDirective`) — always present;
  *      they teach the agent where a project session may write, which AGENTS.md
@@ -74,6 +75,19 @@ If \`miyo-parse\` is missing or fails, report the problem and stop — never sen
  */
 export const COPILOT_MIYO_SEARCH_STEERING = `## Vault semantic search (Miyo)
 The user has Miyo enabled: local, meaning-based semantic search over their vault. For any vault-search intent, use the \`miyo-search\` skill when your builtin \`grep\` search is too slow or doesn't surface enough relevant notes, or whenever the user explicitly asks for Miyo search. Follow the skill's own instructions to run it.`;
+
+/**
+ * Socratic tutor steering, sent only when `studyMode` is "socratic". It turns
+ * the agent from an answer machine into a tutor: study questions are met with
+ * one guiding question at a time so the user has to work the concept out
+ * themselves. Gated like the other steers so the prompt stays byte-identical
+ * (a stable cache prefix) while the mode is off.
+ */
+export const SOCRATIC_STEERING = `## Study mode (Socratic tutor)
+The user enabled Socratic study mode, so treat study questions as exercises to work through, not requests to answer. Never answer a study question directly:
+- Respond with exactly ONE guiding question at a time — hint-first: narrow the problem, then analyze it with the user one step at a time until they reach the answer themselves.
+- If the user is stuck after 2 attempts, give the smallest possible hint — never the full answer.
+- At the end, summarize what the user figured out.`;
 
 /**
  * Where a project session may read and write. Program-authored policy, not "builtin framing":
@@ -176,6 +190,13 @@ export function buildAgentSystemPrompt(): string {
     // prompt-side half of respecting the "Miyo search skill" toggle.
     if (settings.enableMiyoSearchSkill === true) {
       parts.push(COPILOT_MIYO_SEARCH_STEERING);
+    }
+    // Socratic steering is gated on the study-mode toggle: off keeps the
+    // payload byte-identical, socratic swaps direct answers for guiding
+    // questions. It lives with the other conditional steers so the
+    // unconditional planning guidance still closes the block.
+    if (settings.studyMode === "socratic") {
+      parts.push(SOCRATIC_STEERING);
     }
     parts.push(AGENT_TODO_PLANNING_STEERING);
   }

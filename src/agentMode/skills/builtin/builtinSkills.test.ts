@@ -11,6 +11,10 @@ describe("builtinSkills", () => {
       expect(BUILTIN_SKILLS.map((s) => s.name)).toEqual([
         "research",
         "read-scanned-pdf",
+        "study-quiz",
+        "feynman-grade",
+        "defense-sim",
+        "paper-companion",
         "obsidian-markdown",
         "obsidian-bases",
         "json-canvas",
@@ -168,6 +172,71 @@ describe("builtinSkills", () => {
       // user has to install the CLI to use this skill.
       expect(MIYO_PARSE_SKILL.skillMd).toMatch(/remote\s+Miyo\s+server\s+does\s+not\s+help/i);
       expect(MIYO_PARSE_SKILL.skillMd).toMatch(/install Miyo on this machine/i);
+    });
+  });
+
+  describe("study skills", () => {
+    const studySkillMd = (name: string): string => {
+      const skill = BUILTIN_SKILLS.find((s) => s.name === name);
+      if (!skill) throw new Error(`no builtin skill named ${name}`);
+      return skill.skillMd;
+    };
+
+    it("study-quiz works on the session's attachments and quizzes one question at a time", () => {
+      const md = studySkillMd("study-quiz");
+      // Attach-anything: material comes from the session, else vault search or ask.
+      expect(md).toMatch(/attached in this session/i);
+      expect(md).toMatch(/seeded vault search skill/i);
+      // Quiz shape and difficulty spread.
+      expect(md).toMatch(/6-10 items/i);
+      expect(md).toMatch(/definitions → application → transfer/i);
+      // Interactive protocol: ask, wait, grade — no answer-key dump.
+      expect(md).toMatch(/ONE question at a time/i);
+      expect(md).toMatch(/correct \/ partially correct \/ wrong/i);
+      expect(md).toMatch(/Never dump the answer key/i);
+      expect(md).toMatch(/never\s+invent facts/i);
+    });
+
+    it("study-quiz logs misses into the dated gaps note with a scorecard close", () => {
+      const md = studySkillMd("study-quiz");
+      expect(md).toMatch(/Study\/Gaps\.md/);
+      expect(md).toMatch(/## <YYYY-MM-DD> — <topic>/);
+      expect(md).toMatch(/dedupe by question text/i);
+      expect(md).toMatch(/wrong answer/i);
+      expect(md).toMatch(/Why it matters/i);
+      expect(md).toMatch(/X\/Y correct, weakest topic/);
+    });
+
+    it("feynman-grade grades with quoted follow-ups and withholds the gold version by default", () => {
+      const md = studySkillMd("feynman-grade");
+      expect(md).toMatch(/quote the user's exact words/i);
+      expect(md).toMatch(/"why\/how" follow-up/i);
+      expect(md).toMatch(/seeded vault search skill/i);
+      expect(md).toMatch(/1-3 existing vault notes/i);
+      expect(md).toMatch(/ONLY if the\s+user asks/i);
+      expect(md).toMatch(/Never dump the full correct explanation/i);
+    });
+
+    it("defense-sim runs committee rounds, refuses fabricated rivals, and shares the gaps-note format", () => {
+      const md = studySkillMd("defense-sim");
+      expect(md).toMatch(/Contribution & motivation/i);
+      expect(md).toMatch(/Related work/i);
+      expect(md).toMatch(/Method & analysis/i);
+      expect(md).toMatch(/Validity & ethics/i);
+      expect(md).toMatch(/plausible rivals\s+from the vault/i);
+      expect(md).toMatch(/not in the\s+material/i);
+      expect(md).toMatch(/Study\/Gaps\.md/);
+      expect(md).toMatch(/study-quiz/);
+    });
+
+    it("paper-companion checks comprehension before critique and names the scanned-PDF fallback", () => {
+      const md = studySkillMd("paper-companion");
+      expect(md).toMatch(/3 short questions/i);
+      expect(md).toMatch(/ONE at a time/i);
+      expect(md).toMatch(/falsify/i);
+      expect(md).toMatch(/skeptical reviewer/i);
+      expect(md).toMatch(/critique skeleton/i);
+      expect(md).toMatch(/read-scanned-pdf/);
     });
   });
 
