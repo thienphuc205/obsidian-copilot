@@ -10,6 +10,51 @@ import type { BuiltinSkill } from "./builtinSkills";
 
 const ENABLED_AGENTS = ["claude", "codex", "opencode"] as const;
 
+const WEB_SEARCH_VERSION = 1;
+
+export const WEB_SEARCH_SKILL: BuiltinSkill = {
+  name: "web-search",
+  version: WEB_SEARCH_VERSION,
+  enabledAgents: ENABLED_AGENTS,
+  skillMd: `---
+name: web-search
+description: Search the web through the plugin's self-host search channel (the provider and API key configured in Copilot settings, e.g. Firecrawl/Tavily/Exa). Use for any web-search intent when the session provides the self-host search channel.
+metadata:
+  copilot-enabled-agents: claude, codex, opencode
+  copilot-builtin-version: "\${WEB_SEARCH_VERSION}"
+---
+
+# Web search (self-host channel)
+
+The plugin runs a loopback HTTP channel for this session carrying your
+configured search provider. Query it with the session env vars:
+
+~~~bash
+curl -s -X POST "\${COPILOT_SELF_HOST_WEB_SEARCH_URL}" \
+  -H "Authorization: Bearer \${COPILOT_SELF_HOST_WEB_SEARCH_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "<the query>"}'
+~~~
+
+The response is JSON: \`results\` (array of \`{ title, url, snippet/content, publishedAt }\`).
+
+## Rules
+
+- If either env var is missing: Self-Host Mode is off or no provider key is
+  configured. Tell the user exactly what to enable (Settings → Copilot →
+  Self-Host: turn the mode on and set a search provider + key), then stop.
+  NEVER fall back to curl-ing search engines — they block scraping and
+  return nothing useful.
+- One POST per query; do not retry failures in a loop.
+- Result snippets usually answer the question. Fetch a result URL with
+  curl only when a page's full content is genuinely needed, and treat the
+  URL as a citation source.
+- Keep total web calls bounded (the research workflow suggests 2-4 fetches
+  for the most authoritative pages).
+`,
+  files: [],
+};
+
 const READ_SCANNED_PDF_VERSION = 1;
 
 export const READ_SCANNED_PDF_SKILL: BuiltinSkill = {
@@ -73,8 +118,9 @@ source the user can open.
 1. **Scope.** Ambiguous → one clarifying question; else state it in one sentence.
 2. **Plan.** 2-5 sub-queries; show the plan before searching.
 3. **Vault first.** Seeded vault search skill (miyo-search, else grep).
-4. **Web.** Seeded web-search for snippets; web-fetch the 2-4 best pages
-   (primary sources first). Record each URL and date.
+4. **Web.** The \`web-search\` skill for snippets; fetch only the 2-4 best
+   pages (primary sources first). Record each URL and date. Cap the whole
+   run at ~10 tool calls so weak local models cannot loop.
 5. **Cross-check.** Compare conflicting claims and dates.
 6. **Write.** Default \`Research/\`; \`<Topic> (<YYYY-MM-DD>).md\`: research tag +
    date frontmatter, one-line verdict, sections with inline links, "Conflicts
