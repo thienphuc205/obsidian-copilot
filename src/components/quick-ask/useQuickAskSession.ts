@@ -19,13 +19,18 @@ import { processCommandPrompt } from "@/commands/customCommandUtils";
 import { useApp } from "@/context";
 import { useResolvedChatBackendModel } from "@/hooks/useResolvedChatBackendModel";
 import { logError } from "@/logger";
+import type CopilotPlugin from "@/main";
 import type { QuickAskMessage } from "./types";
+import { useQuickAskAgentTurn } from "./useQuickAskAgentTurn";
 
 interface UseQuickAskSessionParams {
+  plugin: CopilotPlugin;
   selectedText: string;
   /** Selected model — a `configuredModelId` in the chat backend. */
   selectedModelKey: string;
   includeNoteContext: boolean;
+  /** When true, turns run through the active agent session instead of Quick Chat. */
+  agentMode: boolean;
 }
 
 interface QuickAskSessionApi {
@@ -41,7 +46,11 @@ interface QuickAskSessionApi {
  */
 export function useQuickAskSession(params: UseQuickAskSessionParams): QuickAskSessionApi {
   const app = useApp();
-  const { selectedText, selectedModelKey, includeNoteContext } = params;
+  const { plugin, selectedText, selectedModelKey, includeNoteContext, agentMode } = params;
+
+  // Agent-mode pipeline. Hooks stay unconditional so the toggle can flip modes
+  // without remounting; the agent branch is only *used* when agentMode is on.
+  const agentTurn = useQuickAskAgentTurn({ plugin, selectedText });
 
   // Message history (completed messages only)
   const [messages, setMessages] = useState<QuickAskMessage[]>([]);
@@ -176,6 +185,19 @@ export function useQuickAskSession(params: UseQuickAskSessionParams): QuickAskSe
       },
     ];
   }, [messages, isStreaming, streamingText]);
+
+  // Reason: The agent branch must be a pure projection selected after all
+  // hooks run, so flipping the toggle swaps pipelines without remounting and
+  // the Quick Chat path (toggle OFF) stays byte-identical to before.
+  if (agentMode) {
+    return {
+      messages: agentTurn.messages,
+      isStreaming: agentTurn.isStreaming,
+      sendMessage: agentTurn.sendMessage,
+      stop: agentTurn.stop,
+      clear: agentTurn.clear,
+    };
+  }
 
   return {
     messages: displayMessages,

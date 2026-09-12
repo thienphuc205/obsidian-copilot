@@ -8,7 +8,7 @@
 
 import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Notice } from "obsidian";
-import { Send, Square, X, MessageSquareX } from "lucide-react";
+import { Send, Square, X, MessageSquareX, Bot } from "lucide-react";
 import { useModelKey } from "@/aiParams";
 import { useDraggable } from "@/hooks/use-draggable";
 import type { ResizeDirection } from "@/hooks/use-resizable";
@@ -64,11 +64,21 @@ export function QuickAskPanel({
   );
 
   // Session hook
+  // Reason: Agent mode persists only per open (component state, default OFF) —
+  // it routes turns through the active agent session, which is a per-open
+  // context, not a durable user preference.
+  const [agentMode, setAgentMode] = useState(false);
   const { messages, isStreaming, sendMessage, stop, clear } = useQuickAskSession({
+    plugin,
     selectedText,
     selectedModelKey,
     includeNoteContext,
+    agentMode,
   });
+
+  const handleToggleAgentMode = useCallback(() => {
+    setAgentMode((prev) => !prev);
+  }, []);
 
   // Derived state
   const hasMessages = messages.length > 0;
@@ -283,6 +293,17 @@ export function QuickAskPanel({
         >
           <div className="tw-h-[5px] tw-w-16 tw-rounded-sm tw-bg-[color-mix(in_srgb,var(--text-muted)_40%,transparent)] hover:tw-bg-[color-mix(in_srgb,var(--text-muted)_65%,transparent)]" />
         </div>
+        <Button
+          className={`tw-absolute tw-right-8 tw-top-1 tw-rounded tw-p-1 ${
+            agentMode ? "tw-text-accent" : "tw-text-normal"
+          }`}
+          variant="ghost2"
+          onClick={handleToggleAgentMode}
+          disabled={isStreaming}
+          title="Agent mode — uses the active agent backend with full skills"
+        >
+          <Bot className="tw-size-4" />
+        </Button>
         <Button
           className="tw-absolute tw-right-2 tw-top-1 tw-rounded tw-p-1 tw-text-normal"
           variant="ghost2"

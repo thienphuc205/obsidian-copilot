@@ -5,7 +5,7 @@
 
 import React, { useEffect, useRef } from "react";
 import { MarkdownRenderer } from "obsidian";
-import { Copy, ClipboardPaste, Replace } from "lucide-react";
+import { Copy, ClipboardPaste, Replace, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getErrorMessage, type ReplaceInvalidReason } from "@/editor/replaceGuard";
 import { logError } from "@/logger";
@@ -106,12 +106,35 @@ export const QuickAskMessageComponent = React.memo(function QuickAskMessageCompo
   if (isStreaming) {
     return (
       <div className="tw-max-w-[95%] tw-self-start tw-rounded-lg tw-rounded-bl-sm tw-bg-secondary tw-px-3 tw-py-2">
+        {message.toolStatusLabel && (
+          <div
+            data-quick-ask-tool-status
+            className="tw-mb-1 tw-flex tw-items-center tw-gap-1.5 tw-text-xs tw-text-muted"
+          >
+            <Loader2 className="tw-size-3 tw-animate-spin" />
+            <span>{message.toolStatusLabel}</span>
+          </div>
+        )}
         <div
           data-quick-ask-selectable
           className="tw-whitespace-pre-wrap tw-break-words tw-text-sm tw-text-normal"
         >
           {message.content}
           <span className="tw-animate-pulse tw-text-accent">▊</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Assistant message - error (left aligned, error styled, no action bar)
+  if (message.isError) {
+    return (
+      <div className="tw-max-w-[95%] tw-self-start tw-rounded-lg tw-rounded-bl-sm tw-bg-secondary tw-px-3 tw-py-2">
+        <div
+          data-quick-ask-selectable
+          className="tw-whitespace-pre-wrap tw-break-words tw-text-sm tw-text-error"
+        >
+          {message.content}
         </div>
       </div>
     );

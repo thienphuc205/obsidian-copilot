@@ -24,6 +24,13 @@ export interface QuickAskMessage {
   role: "user" | "assistant";
   content: string;
   timestamp: number;
+  /** True when the message reports a failed turn; renders with error styling. */
+  isError?: boolean;
+  /**
+   * Compact in-flight tool status for agent-mode turns (e.g. "Working: Read").
+   * Shown above the streaming text; dropped once the turn settles.
+   */
+  toolStatusLabel?: string;
 }
 
 /**
