@@ -53,6 +53,8 @@ const context = await esbuild.context({
   banner: {
     js: banner,
   },
+  // Keep PDF.js and the document parser out of the plugin startup graph. The
+  // dedicated build:pdf entry emits a lazy local module and worker instead.
   entryPoints: ["src/main.ts"],
   bundle: true,
   external: [

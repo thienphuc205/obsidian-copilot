@@ -13,6 +13,9 @@ import type {
   SessionId,
 } from "./types";
 
+/** A stalled backend stop must not hold plugin teardown indefinitely. */
+const PRELOADER_PROCESS_STOP_TIMEOUT_MS = 5_000;
+
 /**
  * Warm result of a successful preload. The manager takes ownership of the
  * already-started process but starts a fresh session for the user's chat.
@@ -57,7 +60,16 @@ export class AgentModelPreloader {
   // recorded so we can clear it if the probe subprocess dies before the
   // manager takes ownership.
   private readonly warmExitUnsubs = new Map<BackendId, () => void>();
+  // Every probe process is owned from creation until it is handed to the
+  // manager or stopped. This includes processes whose start or probe RPC is
+  // still pending, so shutdown can stop them without awaiting that operation.
+  private readonly ownedProcs = new Set<BackendProcess>();
+  // A late probe cleanup must reuse the shutdown already issued by teardown or
+  // refresh. Weak keys avoid retaining completed probe processes forever.
+  private readonly procShutdowns = new WeakMap<BackendProcess, Promise<void>>();
+  private readonly pendingStops = new Set<Promise<void>>();
   private disposed = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(
     private readonly app: App,
@@ -93,10 +105,7 @@ export class AgentModelPreloader {
       this.warm.delete(backendId);
       this.warmExitUnsubs.get(backendId)?.();
       this.warmExitUnsubs.delete(backendId);
-      // Best-effort shutdown of the abandoned warm proc.
-      warm.proc.shutdown().catch((e) => {
-        logWarn(`[AgentMode] preload clearCached: shutdown of warm ${backendId} failed`, e);
-      });
+      void this.stopOwnedProcess(backendId, warm.proc);
       changed = true;
     }
     if (changed) this.notify();
@@ -108,11 +117,13 @@ export class AgentModelPreloader {
    * the process from here on.
    */
   takeWarm(backendId: BackendId): WarmBackend | null {
+    if (this.disposed) return null;
     const entry = this.warm.get(backendId);
     if (!entry) return null;
     this.warm.delete(backendId);
     this.warmExitUnsubs.get(backendId)?.();
     this.warmExitUnsubs.delete(backendId);
+    this.ownedProcs.delete(entry.proc);
     return entry;
   }
 
@@ -199,21 +210,91 @@ export class AgentModelPreloader {
     return () => this.listeners.delete(listener);
   }
 
-  shutdown(): void {
+  /**
+   * Stop every probe-owned process without waiting for a stalled probe or RPC.
+   * Disposal is synchronous; repeated callers share the same cleanup promise.
+   */
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+
+    // Mark disposal before creating any cleanup promise. Callers that race
+    // shutdown must synchronously lose the right to start or adopt a probe.
     this.disposed = true;
     this.modelCatalogCache.clear();
     this.effortCatalog.clear();
     this.inflight.clear();
     this.pendingRefresh.clear();
     this.listeners.clear();
+    const owned = new Set(this.ownedProcs);
     for (const [backendId, warm] of this.warm) {
       this.warmExitUnsubs.get(backendId)?.();
-      warm.proc.shutdown().catch((e) => {
-        logWarn(`[AgentMode] preload shutdown: warm ${backendId} shutdown failed`, e);
-      });
+      owned.add(warm.proc);
     }
     this.warm.clear();
     this.warmExitUnsubs.clear();
+
+    let resolveShutdown!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      resolveShutdown = resolve;
+    });
+    this.shutdownPromise = completion;
+
+    // Do not await inflight probe promises: a backend may never resolve a
+    // startup or prefetch RPC. We do await each owned process stop, bounded by
+    // stopOwnedProcess, so cooperative backends finish cleanly while a stuck
+    // backend cannot wedge plugin teardown.
+    const stops = new Set(this.pendingStops);
+    for (const proc of owned) stops.add(this.stopOwnedProcess("shutdown", proc));
+    void Promise.allSettled(stops).then(() => resolveShutdown());
+    return completion;
+  }
+
+  private stopOwnedProcess(backendId: BackendId, proc: BackendProcess): Promise<void> {
+    const existing = this.procShutdowns.get(proc);
+    if (existing) return existing;
+
+    let timer: number | null = null;
+    let finished = false;
+    let resolveCompletion!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    this.procShutdowns.set(proc, completion);
+    this.pendingStops.add(completion);
+
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+      this.ownedProcs.delete(proc);
+      this.pendingStops.delete(completion);
+      resolveCompletion();
+    };
+
+    timer = window.setTimeout(() => {
+      logWarn(
+        `[AgentMode] preload ${backendId}: backend stop exceeded ${PRELOADER_PROCESS_STOP_TIMEOUT_MS}ms`
+      );
+      finish();
+    }, PRELOADER_PROCESS_STOP_TIMEOUT_MS);
+
+    try {
+      void Promise.resolve(proc.shutdown()).then(
+        () => finish(),
+        (error) => {
+          logWarn(`[AgentMode] preload ${backendId}: backend shutdown failed`, error);
+          finish();
+        }
+      );
+    } catch (error) {
+      logWarn(`[AgentMode] preload ${backendId}: backend shutdown threw`, error);
+      finish();
+    }
+
+    return completion;
   }
 
   private notify(): void {
@@ -227,6 +308,7 @@ export class AgentModelPreloader {
   }
 
   private async runProbe(backendId: BackendId): Promise<void> {
+    if (this.disposed) return;
     if (Platform.isMobile) return;
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) return;
@@ -245,61 +327,66 @@ export class AgentModelPreloader {
       clientVersion: this.plugin.manifest.version,
       descriptor,
     });
+    this.ownedProcs.add(proc);
 
     let probe: { sessionId: SessionId; state: BackendState } | null = null;
+    let retained = false;
     try {
+      if (this.disposed) return;
       await proc.start?.();
+      if (this.disposed) return;
       const storedId = descriptor.getProbeSessionId?.(getSettings());
       probe = await this.fetchInitialState(proc, descriptor, backendId, storedId, cwd);
-    } catch (err) {
-      logError(`[AgentMode] preload ${backendId} failed`, err);
-    }
-
-    if (this.disposed || !probe || (!probe.state.model && !probe.state.mode)) {
-      if (probe) {
-        logInfo(`[AgentMode] preload ${backendId}: agent did not report any initial state`);
-      }
-      try {
-        await proc.shutdown();
-      } catch (e) {
-        logWarn(`[AgentMode] preload ${backendId}: shutdown failed`, e);
-      }
-      return;
-    }
-
-    // Discover each enabled model's effort options before exposing the warm
-    // entry. The probe loop switches the probe session's model and restores it,
-    // so doing it now (rather than after the manager adopts the session) keeps
-    // the adopted session on the original model. Cheap (~ms per switch) and
-    // best-effort — failures leave the picker without prefetched effort.
-    await this.runEffortPrefetch(backendId, descriptor, proc, probe.sessionId, probe.state);
-
-    // Probe succeeded — retain the running subprocess as a warm entry so
-    // the first chat-open can adopt it instead of paying another spawn +
-    // initialize round-trip.
-    const warm: WarmBackend = {
-      proc,
-    };
-    const exitUnsub = proc.onExit(() => {
       if (this.disposed) return;
-      // Subprocess died before the manager claimed it. Drop the warm
-      // entry; next createSession will spawn a fresh one through the
-      // descriptor.
-      if (this.warm.get(backendId) === warm) {
-        this.warm.delete(backendId);
-        this.modelCatalogCache.delete(backendId);
-        this.effortCatalog.delete(backendId);
-        this.warmExitUnsubs.delete(backendId);
-        this.notify();
+
+      if (!probe || (!probe.state.model && !probe.state.mode)) {
+        if (probe) {
+          logInfo(`[AgentMode] preload ${backendId}: agent did not report any initial state`);
+        }
+        return;
       }
-    });
-    this.warm.set(backendId, warm);
-    this.modelCatalogCache.set(backendId, {
-      availableModels: probe.state.model?.availableModels ?? null,
-    });
-    this.warmExitUnsubs.set(backendId, exitUnsub);
-    logProbeResult(backendId, "session probe", probe.state);
-    this.notify();
+
+      // Discover each enabled model's effort options before exposing the warm
+      // entry. The probe loop switches the probe session's model and restores it,
+      // so doing it now (rather than after the manager adopts the session) keeps
+      // the adopted session on the original model. Cheap (~ms per switch) and
+      // best-effort — failures leave the picker without prefetched effort.
+      await this.runEffortPrefetch(backendId, descriptor, proc, probe.sessionId, probe.state);
+      if (this.disposed) return;
+
+      // Probe succeeded — retain the running subprocess as a warm entry so
+      // the first chat-open can adopt it instead of paying another spawn +
+      // initialize round-trip.
+      const warm: WarmBackend = {
+        proc,
+      };
+      const exitUnsub = proc.onExit(() => {
+        if (this.disposed) return;
+        // Subprocess died before the manager claimed it. Drop the warm
+        // entry; next createSession will spawn a fresh one through the
+        // descriptor.
+        if (this.warm.get(backendId) === warm) {
+          this.warm.delete(backendId);
+          this.modelCatalogCache.delete(backendId);
+          this.effortCatalog.delete(backendId);
+          this.warmExitUnsubs.delete(backendId);
+          this.notify();
+        }
+      });
+      this.warm.set(backendId, warm);
+      this.modelCatalogCache.set(backendId, {
+        availableModels: probe.state.model?.availableModels ?? null,
+      });
+      this.warmExitUnsubs.set(backendId, exitUnsub);
+      this.ownedProcs.delete(proc);
+      retained = true;
+      logProbeResult(backendId, "session probe", probe.state);
+      this.notify();
+    } catch (err) {
+      if (!this.disposed) logError(`[AgentMode] preload ${backendId} failed`, err);
+    } finally {
+      if (!retained) await this.stopOwnedProcess(backendId, proc);
+    }
   }
 
   /**

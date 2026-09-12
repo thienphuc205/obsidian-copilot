@@ -40,3 +40,6 @@ copilot/acp-frames.old.ndjson
 # Models.dev catalog cache (disposable runtime cache under .copilot/)
 .copilot/model-catalog-cache.json
 .otacon/
+
+# Agent-run scratch logs and canary snapshots (not part of the plugin)
+/work/

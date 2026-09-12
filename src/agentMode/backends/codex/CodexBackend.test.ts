@@ -15,8 +15,20 @@ import {
 import { detectBinary } from "@/utils/detectBinary";
 import { CodexBackend } from "./CodexBackend";
 import { resolveSupportedCodexAcpEntry } from "./codexVersion";
+import { computeAgentScope, setActiveAgentScope } from "@/agentMode/session/agentScope";
 
 jest.mock("@/utils/detectBinary", () => ({ detectBinary: jest.fn() }));
+
+const mockStartAgentWebBridge = jest.fn();
+const mockCreateWebProvider = jest.fn();
+
+jest.mock("@/web/provider", () => ({
+  createWebProvider: (...args: unknown[]) => mockCreateWebProvider(...args),
+}));
+
+jest.mock("@/web/acpWebBridge", () => ({
+  startAgentWebBridge: (...args: unknown[]) => mockStartAgentWebBridge(...args),
+}));
 
 jest.mock("@/logger", () => ({
   logInfo: jest.fn(),
@@ -69,7 +81,12 @@ describe("CodexBackend", () => {
       const hostPlatform = process.platform;
       // POSIX descriptor fixtures must not inherit the Windows Node-launch branch.
       // https://github.com/logancyang/obsidian-copilot/issues/2967
-      afterEach(() => Object.defineProperty(process, "platform", { value: hostPlatform }));
+      afterEach(() => {
+        Object.defineProperty(process, "platform", { value: hostPlatform });
+        // The vault-selection sandbox is a module-global sticky scope; a leaked
+        // selection would append its directive to every later spawn's prompt.
+        setActiveAgentScope(null);
+      });
       beforeEach(() => {
         Object.defineProperty(process, "platform", { value: "darwin" });
         jest
@@ -91,6 +108,19 @@ describe("CodexBackend", () => {
               codex: { binaryPath: "/usr/local/bin/codex-acp" },
             },
           },
+        });
+        mockStartAgentWebBridge.mockReset();
+        mockCreateWebProvider.mockReset();
+        mockCreateWebProvider.mockImplementation((configuration: Record<string, string>) => ({
+          ...configuration,
+          search: jest.fn(),
+          fetch: jest.fn(),
+          testConnection: jest.fn(),
+        }));
+        mockStartAgentWebBridge.mockResolvedValue({
+          url: "http://127.0.0.1:43123/mcp",
+          token: "bridge-token-sentinel",
+          dispose: jest.fn().mockResolvedValue(undefined),
         });
       });
 
@@ -128,16 +158,6 @@ describe("CodexBackend", () => {
         expect(config.developer_instructions).toContain("{activeNote}");
         expect(config.developer_instructions).not.toContain("metadata.copilot-enabled-agents");
         expect(config.developer_instructions).not.toContain("copilot/skills/<name>/SKILL.md");
-      });
-
-      it("passes the plugin version to built-in Copilot Plus skills", async () => {
-        setSettings({ isPaidUser: true, plusLicenseKey: "plus-token", userId: "user-1" });
-
-        const desc = await new CodexBackend("4.0.0-preview-260802").buildSpawnDescriptor({
-          vaultBasePath: "/vault",
-        });
-
-        expect(desc.env.COPILOT_CLIENT_VERSION).toBe("4.0.0-preview-260802");
       });
 
       it("https://github.com/Brevilabs/obsidian-copilot-private/issues/121 gives global and Project sessions the same protected active-vault Miyo identity", async () => {
@@ -249,6 +269,51 @@ describe("CodexBackend", () => {
         );
       });
 
+      it("appends the workspace-write confinement directive for a selection narrower than the vault root", async () => {
+        const scope = computeAgentScope({ contextFolders: ["Research"] }, "/vault", {
+          availableFilePaths: [],
+        });
+        setActiveAgentScope(scope);
+        const backend = new CodexBackend();
+        const desc = await backend.buildSpawnDescriptor({ vaultBasePath: "/vault" });
+        const config = JSON.parse(desc.env.CODEX_CONFIG as string);
+        // The session cwd that makes this true is set by the manager at
+        // session-open; the directive names the same common root.
+        expect(config.developer_instructions).toBe(
+          `${buildAgentSystemPrompt()}\nWorkspace-write is confined to /vault/Research; treat it as the only writable area for this session.`
+        );
+        // The pinned safety fields must not move because of the directive.
+        expect(config.sandbox_mode).toBe("workspace-write");
+        expect(config.approval_policy).toBe("on-request");
+        expect(config.approvals_reviewer).toBe("user");
+      });
+
+      it("does not append the confinement directive when the selection does not narrow the vault root", async () => {
+        // Files-only (and vault-root) selections answer the vault root as the
+        // workspace, which is codex's natural boundary already.
+        const scope = computeAgentScope(
+          { contextNotes: [{ path: "Research/paper.md" }] },
+          "/vault",
+          { availableFilePaths: ["Research/paper.md"] }
+        );
+        setActiveAgentScope(scope);
+        const desc = await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
+        expect(JSON.parse(desc.env.CODEX_CONFIG as string).developer_instructions).toBe(
+          buildAgentSystemPrompt()
+        );
+      });
+
+      it("keeps the shared prompt byte for byte while the confinement directive rides after it", async () => {
+        setActiveAgentScope(
+          computeAgentScope({ contextFolders: ["a/b"] }, "/vault", { availableFilePaths: [] })
+        );
+        const desc = await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
+        const value = JSON.parse(desc.env.CODEX_CONFIG as string).developer_instructions;
+        expect(value.startsWith(`${buildAgentSystemPrompt()}\nWorkspace-write is confined`)).toBe(
+          true
+        );
+      });
+
       it("preserves user CODEX_CONFIG keys while enforcing Copilot-owned fields", async () => {
         setSettings({
           agentMode: {
@@ -322,6 +387,189 @@ describe("CodexBackend", () => {
         const desc = await backend.buildSpawnDescriptor({ vaultBasePath: "/vault" });
         expect(desc.env.INITIAL_AGENT_MODE).toBe("agent");
       });
+
+      it.each([
+        ["disabled", { enableAgentWebTools: false, firecrawlAgentWebApiKey: "valid-key-1234" }],
+        ["missing key", { enableAgentWebTools: true, firecrawlAgentWebApiKey: "" }],
+      ])("does not start the web bridge when web tools are %s", async (_label, webSettings) => {
+        setSettings({ agentWebSearchProvider: "firecrawl", ...webSettings });
+
+        const desc = await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
+
+        expect(mockCreateWebProvider).not.toHaveBeenCalled();
+        expect(mockStartAgentWebBridge).not.toHaveBeenCalled();
+        expect(desc.mcpServers).toBeUndefined();
+      });
+
+      it("starts independent web tools without Plus or self-host entitlement", async () => {
+        setSettings({
+          enableAgentWebTools: true,
+          agentWebSearchProvider: "firecrawl",
+          firecrawlAgentWebApiKey: "firecrawl-key-1234",
+          enableSelfHostMode: false,
+        });
+
+        const desc = await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
+
+        expect(mockStartAgentWebBridge).toHaveBeenCalledWith({ getProvider: expect.any(Function) });
+        expect(desc.mcpServers).toEqual([
+          {
+            type: "http",
+            name: "copilot-web",
+            url: "http://127.0.0.1:43123/mcp",
+            headers: [{ name: "Authorization", value: "Bearer bridge-token-sentinel" }],
+          },
+        ]);
+      });
+
+      it("keeps the provider callback live while revoking disable, provider changes, and key rotation", async () => {
+        const initialKey = "firecrawl-initial-1234";
+        setSettings({
+          enableAgentWebTools: true,
+          agentWebSearchProvider: "firecrawl",
+          firecrawlAgentWebApiKey: initialKey,
+        });
+
+        await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
+        const getProvider = mockStartAgentWebBridge.mock.calls[0][0].getProvider as () =>
+          | { apiKey: string }
+          | undefined;
+
+        expect(getProvider()?.apiKey).toBe(initialKey);
+        setSettings({ enableAgentWebTools: false });
+        expect(getProvider()).toBeUndefined();
+        setSettings({
+          enableAgentWebTools: true,
+          agentWebSearchProvider: undefined,
+          firecrawlAgentWebApiKey: "firecrawl-rotated-1234",
+        });
+        expect(getProvider()).toBeUndefined();
+        setSettings({ agentWebSearchProvider: "firecrawl" });
+        expect(getProvider()).toBeUndefined();
+
+        await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
+        const rotatedGetProvider = mockStartAgentWebBridge.mock.calls[1][0].getProvider as () =>
+          | { apiKey: string }
+          | undefined;
+        expect(rotatedGetProvider()?.apiKey).toBe("firecrawl-rotated-1234");
+      });
+
+      it("selects Tavily without entitlement and revokes the old bridge even when both providers have the same key", async () => {
+        const key = "shared-key-fixture";
+        setSettings({
+          enableAgentWebTools: true,
+          agentWebSearchProvider: "firecrawl",
+          firecrawlAgentWebApiKey: key,
+          tavilyAgentWebApiKey: key,
+          enableSelfHostMode: false,
+        });
+        await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
+        const oldProvider = mockStartAgentWebBridge.mock.calls[0][0].getProvider;
+        setSettings({ agentWebSearchProvider: "tavily" });
+        expect(oldProvider()).toBeUndefined();
+        mockCreateWebProvider.mockClear();
+        const desc = await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
+        expect(mockCreateWebProvider).toHaveBeenCalledWith(
+          expect.objectContaining({ provider: "tavily", apiKey: key })
+        );
+        expect(desc.mcpServers?.[0].name).toBe("copilot-web");
+        expect(
+          JSON.stringify({ env: desc.env, args: desc.args, mcp: desc.mcpServers })
+        ).not.toContain(key);
+        const currentProvider = mockStartAgentWebBridge.mock.calls[1][0].getProvider;
+        expect(currentProvider()).toBeDefined();
+        setSettings({ tavilyAgentWebApiKey: "rotated-tavily-key" });
+        expect(currentProvider()).toBeUndefined();
+      });
+
+      it.each(["exa", "custom"] as const)(
+        "starts %s with isolated credentials and revokes endpoint/key changes",
+        async (provider) => {
+          const key = "provider-secret-fixture";
+          setSettings({
+            enableAgentWebTools: true,
+            agentWebSearchProvider: provider,
+            exaAgentWebApiKey: key,
+            customAgentWebApiKey: key,
+            customAgentWebBaseUrl: "https://first.example.com/api",
+            enableSelfHostMode: false,
+          });
+          const desc = await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
+          expect(desc.mcpServers?.[0].name).toBe("copilot-web");
+          expect(
+            JSON.stringify({ env: desc.env, args: desc.args, mcp: desc.mcpServers })
+          ).not.toContain(key);
+          const getProvider = mockStartAgentWebBridge.mock.calls[0][0].getProvider;
+          expect(getProvider()).toBeDefined();
+          if (provider === "custom")
+            setSettings({ customAgentWebBaseUrl: "https://second.example.com/api" });
+          else setSettings({ exaAgentWebApiKey: "rotated-fixture-key" });
+          expect(getProvider()).toBeUndefined();
+        }
+      );
+
+      it("does not start Custom when the endpoint is missing", async () => {
+        setSettings({
+          enableAgentWebTools: true,
+          agentWebSearchProvider: "custom",
+          customAgentWebApiKey: "custom-key-fixture",
+          customAgentWebBaseUrl: "",
+        });
+        const desc = await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
+        expect(desc.mcpServers).toBeUndefined();
+        expect(mockStartAgentWebBridge).not.toHaveBeenCalled();
+      });
+
+      it("does not borrow the Firecrawl key when Tavily is selected without a key", async () => {
+        setSettings({
+          enableAgentWebTools: true,
+          agentWebSearchProvider: "tavily",
+          firecrawlAgentWebApiKey: "firecrawl-fixture-key",
+          tavilyAgentWebApiKey: "",
+        });
+        const desc = await new CodexBackend().buildSpawnDescriptor({ vaultBasePath: "/vault" });
+        expect(desc.mcpServers).toBeUndefined();
+        expect(mockStartAgentWebBridge).not.toHaveBeenCalled();
+      });
+
+      it.each([false, true])(
+        "preserves inherited Firecrawl environment and never injects the integration key when web tools are %s",
+        async (enabled) => {
+          const key = "firecrawl-configured-1234";
+          jest.replaceProperty(process, "env", {
+            ...process.env,
+            FIRECRAWL_API_KEY: "ambient-firecrawl-secret",
+            FIRECRAWL_API_TOKEN: "ambient-firecrawl-token",
+            firecrawlAgentWebApiKey: "ambient-lowercase-firecrawl-secret",
+          });
+          try {
+            setSettings({
+              enableAgentWebTools: enabled,
+              agentWebSearchProvider: "firecrawl",
+              firecrawlAgentWebApiKey: key,
+            });
+
+            const desc = await new CodexBackend().buildSpawnDescriptor({
+              vaultBasePath: "/vault",
+            });
+            const serialized = JSON.stringify({
+              command: desc.command,
+              args: desc.args,
+              env: desc.env,
+              mcpServers: desc.mcpServers,
+            });
+
+            expect(desc.env.FIRECRAWL_API_KEY).toBe("ambient-firecrawl-secret");
+            expect(desc.env.FIRECRAWL_API_TOKEN).toBe("ambient-firecrawl-token");
+            expect(serialized).not.toContain(key);
+            expect(serialized).toContain("ambient-firecrawl-secret");
+            expect(serialized).toContain("ambient-firecrawl-token");
+            expect(serialized).toContain("ambient-lowercase-firecrawl-secret");
+          } finally {
+            jest.restoreAllMocks();
+          }
+        }
+      );
 
       it("lets a user override the initial codex-acp mode", async () => {
         setSettings({

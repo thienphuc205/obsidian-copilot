@@ -39,6 +39,20 @@ export type { AgentModelPickerOverride } from "./ui/useAgentModelPicker";
 export { useAgentModePicker } from "./ui/useAgentModePicker";
 export type { AgentModePickerOverride } from "./ui/useAgentModePicker";
 export type { AgentSessionManager } from "./session/AgentSessionManager";
+export {
+  CHAT_ATTACHMENT_REF_SCHEMA_VERSION,
+  MAX_CHAT_ATTACHMENT_REFS,
+  normalizeLocalAttachmentRefs,
+} from "./attachmentRefs";
+export type { LocalAttachmentRef } from "./attachmentRefs";
+export type { AgentSession } from "./session/AgentSession";
+export type {
+  SessionLocalAttachmentLiveTargetGetter,
+  SessionLocalAttachmentSnapshot,
+  SessionLocalAttachmentStaging,
+  SessionLocalAttachmentStagingError,
+  SessionLocalAttachmentTarget,
+} from "./session/sessionLocalAttachments";
 export type {
   AgentBrand,
   BackendDescriptor,
@@ -48,10 +62,8 @@ export type {
   ManagedInstallActionState,
 } from "./session/types";
 export { partitionOpencodeOnlyWireIds } from "./backends/opencode/opencodeProbePartition";
-export {
-  mapProviderToOpencodeId,
-  isOpencodeZenWireId,
-} from "./backends/opencode/opencodeModelResolve";
+export { mapProviderToOpencodeId } from "./backends/opencode/opencodeModelResolve";
+export { isOpencodeZenWireId } from "@/lib/opencodeZenWireId";
 export type { OpencodeProviderMapping } from "./backends/opencode/opencodeModelResolve";
 export { installBadge, InstallBadge } from "./backends/shared/installStatus";
 export type {
@@ -305,12 +317,34 @@ export function createAgentSessionManager(app: App, plugin: CopilotPlugin): Agen
         );
     }
   });
+  // Native web credentials and enablement are session-scoped. Revoke the
+  // current Codex bridge before the manager builds a replacement, even when
+  // a turn is busy; the bridge callback also reads current settings per call.
+  subscribeToSettingsChange((prev, next) => {
+    if (
+      prev.enableAgentWebTools === next.enableAgentWebTools &&
+      prev.agentWebSearchProvider === next.agentWebSearchProvider &&
+      prev.firecrawlAgentWebApiKey === next.firecrawlAgentWebApiKey &&
+      prev.tavilyAgentWebApiKey === next.tavilyAgentWebApiKey &&
+      prev.exaAgentWebApiKey === next.exaAgentWebApiKey &&
+      prev.customAgentWebApiKey === next.customAgentWebApiKey &&
+      prev.customAgentWebBaseUrl === next.customAgentWebBaseUrl
+    ) {
+      return;
+    }
+    void manager
+      .restartBackend("codex", "independent Agent web tools changed", {
+        deferWhileBusy: false,
+      })
+      .catch((error) =>
+        logError("[AgentMode] restart after independent Agent web tools change failed", error)
+      );
+  });
   // Seed the plugin-shipped builtin skills into the canonical folder, then run
   // discovery so the pass picks them up and fans them out to the agent dirs.
   // Miyo vault search and Miyo document parsing are gated independently;
   // `planManagedBuiltins` decides both what to write and what to remove, so no
-  // gate can be added without its prune (the cloud PDF skill Miyo documents
-  // replace is pruned this way). Discovery runs even when seeding fails so
+  // gate can be added without its prune). Discovery runs even when seeding fails so
   // existing skills still reconcile.
   //
   // Passes are SERIALIZED through `seedChain`: a fast enable→disable (or a folder
@@ -351,12 +385,11 @@ export function createAgentSessionManager(app: App, plugin: CopilotPlugin): Agen
   };
   subscribeToSettingsChange((prev, next) => {
     // The managed env injected at spawn (see `buildBuiltinSkillEnv`) changes with
-    // Copilot Plus sign-in/out or license rotation (the decrypted license the
-    // builtin Plus skill scripts read), with the Miyo server URL (the `MIYO_URL`
-    // the bundled miyo CLI reads), with the Miyo Search scope, or with
-    // OpenCode's Self-Host routing boundary. These values are only read on a
-    // fresh spawn. The policy selects only affected backends and restarts
-    // coalesce with any Miyo-availability re-seed restart below.
+    // the Miyo server URL (the `MIYO_URL` the bundled miyo CLI reads), with the
+    // Miyo Search scope, or with OpenCode's Self-Host routing boundary. These
+    // values are only read on a fresh spawn. The policy selects only affected
+    // backends and restarts coalesce with any Miyo-availability re-seed restart
+    // below.
     for (const descriptor of listBackendDescriptors()) {
       const managedEnvRestartPolicy = getBuiltinSkillEnvRestartPolicy(prev, next, descriptor.id);
       if (managedEnvRestartPolicy !== "none") {
@@ -383,14 +416,12 @@ export function createAgentSessionManager(app: App, plugin: CopilotPlugin): Agen
     // `enableMiyoSearchSkill` and `docProcessorBackend` are the two gates
     // `planManagedBuiltins` reads, and each also selects prompt steering that
     // codex/opencode bake at spawn. `enableMiyo` / `miyoServerUrl` are still
-    // watched because the injected env (MIYO_URL) changes with them, and
-    // `isPaidUser` because it changes the license the seeded Plus scripts read.
+    // watched because the injected env (MIYO_URL) changes with them.
     const miyoAvailabilityChanged =
       prev.enableMiyoSearchSkill !== next.enableMiyoSearchSkill ||
       prev.docProcessorBackend !== next.docProcessorBackend ||
       prev.enableMiyo !== next.enableMiyo ||
-      prev.miyoServerUrl !== next.miyoServerUrl ||
-      prev.isPaidUser !== next.isPaidUser;
+      prev.miyoServerUrl !== next.miyoServerUrl;
     if (prevFolder !== nextFolder || miyoAvailabilityChanged) {
       // Miyo availability also gates the `miyo-search` system-prompt steering
       // (see `buildAgentSystemPrompt`). codex/opencode bake the prompt at spawn,
@@ -410,8 +441,10 @@ export function createAgentSessionManager(app: App, plugin: CopilotPlugin): Agen
           // Backends skipped above rebuild the prompt per `newSession()`, so a new
           // chat is already correct — but one already open keeps the route it was
           // born with, and after a switch to Miyo that means a live Claude session
-          // still holds the Plus steering while `copilot-read-pdf` is gone, whose
-          // fallback clause then sends the PDF to its own reader.
+          // holds no local document steering while `miyo-parse` has just been
+          // seeded (the pruning above only takes effect on its next session).
+          // The restart re-reads the setting so the open session's next turn
+          // reflects the flip.
           for (const descriptor of listBackendDescriptors()) {
             if (descriptor.restartOnSystemPromptChange) continue;
             void manager

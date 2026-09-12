@@ -5,6 +5,7 @@ import {
   hasPersistedSecrets,
   isSensitiveKey,
   stripKeychainFields,
+  TOP_LEVEL_SECRET_FIELDS,
 } from "@/services/settingsSecretTransforms";
 
 function makeSettings(overrides: Partial<CopilotSettings> = {}): CopilotSettings {
@@ -23,6 +24,10 @@ describe("settingsSecretTransforms", () => {
       "clientSecret",
       "password",
       "plusLicenseKey",
+      "firecrawlAgentWebApiKey",
+      "tavilyAgentWebApiKey",
+      "exaAgentWebApiKey",
+      "customAgentWebApiKey",
     ])("recognizes %s as sensitive", (key) => {
       expect(isSensitiveKey(key)).toBe(true);
     });
@@ -53,6 +58,11 @@ describe("settingsSecretTransforms", () => {
         expected: true,
       },
       {
+        name: "detects the independent Agent web key",
+        rawData: { firecrawlAgentWebApiKey: "fc-secret" },
+        expected: true,
+      },
+      {
         name: "detects a secret in a retired model list (https://github.com/Brevilabs/obsidian-copilot-private/issues/283)",
         rawData: {
           retiredModels: [{ name: "embed", provider: "openai", apiKey: "secret" }],
@@ -70,6 +80,13 @@ describe("settingsSecretTransforms", () => {
     ])("$name", ({ rawData, expected }) => {
       expect(hasPersistedSecrets(rawData as Record<string, unknown>)).toBe(expected);
     });
+  });
+
+  it("derives the Agent web key from the canonical default settings", () => {
+    expect(TOP_LEVEL_SECRET_FIELDS).toContain("firecrawlAgentWebApiKey");
+    expect(TOP_LEVEL_SECRET_FIELDS).toContain("tavilyAgentWebApiKey");
+    expect(TOP_LEVEL_SECRET_FIELDS).toContain("exaAgentWebApiKey");
+    expect(TOP_LEVEL_SECRET_FIELDS).toContain("customAgentWebApiKey");
   });
 
   describe("stripKeychainFields()", () => {
@@ -96,6 +113,26 @@ describe("settingsSecretTransforms", () => {
 
       expect(record.openAIApiKey).toBe("");
       expect(record.activeModels).toBeUndefined();
+    });
+
+    it("strips the independent Agent web key without mutating the input", () => {
+      const settings = makeSettings({
+        firecrawlAgentWebApiKey: "fc-secret",
+        tavilyAgentWebApiKey: "tvly-secret",
+        exaAgentWebApiKey: "exa-secret",
+        customAgentWebApiKey: "custom-secret",
+      });
+
+      const result = stripKeychainFields(settings);
+
+      expect(result.firecrawlAgentWebApiKey).toBe("");
+      expect(settings.firecrawlAgentWebApiKey).toBe("fc-secret");
+      expect(result.tavilyAgentWebApiKey).toBe("");
+      expect(settings.tavilyAgentWebApiKey).toBe("tvly-secret");
+      expect(result.exaAgentWebApiKey).toBe("");
+      expect(settings.exaAgentWebApiKey).toBe("exa-secret");
+      expect(result.customAgentWebApiKey).toBe("");
+      expect(settings.customAgentWebApiKey).toBe("custom-secret");
     });
   });
 

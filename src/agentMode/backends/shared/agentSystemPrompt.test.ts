@@ -11,10 +11,8 @@ import {
   buildAgentSystemPrompt,
   COPILOT_MIYO_DOCUMENT_STEERING,
   COPILOT_MIYO_SEARCH_STEERING,
-  COPILOT_PLUS_DOCUMENT_STEERING,
   COPILOT_INSTRUCTION_PRECEDENCE,
   COPILOT_PROJECT_WORKSPACE_POLICY,
-  COPILOT_PLUS_TOOLS_STEERING,
   COPILOT_PROMPT_BASE,
 } from "./agentSystemPrompt";
 
@@ -83,53 +81,29 @@ describe("agentSystemPrompt", () => {
       expect(COPILOT_PROJECT_WORKSPACE_POLICY).toContain("configured context sources");
     });
 
-    it("steers toward the builtin Copilot Plus skills regardless of Plus status", () => {
-      // Default settings → NOT a Plus user; steering must still be present so a
-      // users fall back to their own tools via the steering's fallback clause.
-      const nonPlus = buildAgentSystemPrompt();
-      expect(nonPlus).toContain(COPILOT_PLUS_TOOLS_STEERING);
-      expect(nonPlus).toContain("copilot-web-search");
-      expect(nonPlus).toContain("copilot-web-fetch");
-      expect(nonPlus).toContain("copilot-read-pdf");
-      expect(nonPlus).toContain("copilot-youtube-transcript");
-      expect(nonPlus).toContain("copilot-fetch-x");
-      // Fallback clause so a missing/unlicensed skill never dead-ends or blocks
-      // a free user — it routes the agent to its own equivalent tool instead.
-      expect(nonPlus).toMatch(/silently fall back to your own equivalent tool/i);
-      expect(nonPlus).toMatch(/never refuse and never block the user/i);
-      // Fallback also covers a skill that runs but fails for this request (e.g. a
-      // page the relay can't fetch), so a single bad input doesn't dead-end it.
-      expect(nonPlus).toMatch(/fails for this particular request/i);
-
-      // A Plus user gets the same steering.
-      updateSetting("isPaidUser", true);
-      expect(buildAgentSystemPrompt()).toContain(COPILOT_PLUS_TOOLS_STEERING);
-    });
-
-    it("routes external questions to the web proactively and keeps vault text out of queries", () => {
-      const prompt = buildAgentSystemPrompt();
-      // Both halves of the routing rule, plus the privacy constraint on queries.
-      expect(prompt).toMatch(/search locally first/i);
-      expect(prompt).toMatch(/without waiting for an explicit web-search request/i);
-      expect(prompt).toMatch(/Do not place text from the vault into a web query/i);
-    });
-
     it("uses the local fail-closed document route only when Miyo is selected", () => {
       updateSetting("docProcessorBackend", "miyo");
       const prompt = buildAgentSystemPrompt();
       expect(prompt).toContain(COPILOT_MIYO_DOCUMENT_STEERING);
-      // The Plus route must be absent, not merely outranked: `copilot-read-pdf` is
-      // pruned from disk in this mode, so steering toward it would dead-end.
-      expect(prompt).not.toContain(COPILOT_PLUS_DOCUMENT_STEERING);
       expect(prompt).toContain("miyo-parse");
-      // Cancels the blanket fallback clause the Plus tools steering sets up.
-      expect(prompt).toMatch(/fallback rule above does NOT apply/i);
+      // Fail-closed: no fallback clause may license a silent cloud upload.
+      expect(prompt).toMatch(/never send the document to a cloud parser/i);
     });
 
-    it("suppresses the steering when the builtin prompt is disabled", () => {
+    it("sends the local Miyo document section for the default (now only) Document Processor", () => {
+      // The relay document route is gone; the persisted backend always
+      // resolves to the local Miyo steering.
+      const prompt = buildAgentSystemPrompt();
+      expect(prompt).toContain(COPILOT_MIYO_DOCUMENT_STEERING);
+    });
+
+    it("suppresses the base prompt when 'disable builtin' is on, keeping the pill directive", () => {
       setDisableBuiltinSystemPrompt(true);
       const prompt = buildAgentSystemPrompt();
-      expect(prompt).not.toContain(COPILOT_PLUS_TOOLS_STEERING);
+      expect(prompt).not.toContain(COPILOT_PROMPT_BASE);
+      expect(prompt).not.toContain("You are Obsidian Copilot");
+      expect(prompt).not.toContain(AGENT_TODO_PLANNING_STEERING);
+      expect(prompt).toContain("{folder_name}");
     });
 
     it("omits the Miyo steering when the search skill is not installed", () => {

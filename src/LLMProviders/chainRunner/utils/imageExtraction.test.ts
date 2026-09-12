@@ -15,7 +15,7 @@ describe("Image extraction from content", () => {
     jest.clearAllMocks();
   });
 
-  // Helper function that replicates the extractEmbeddedImages logic from CopilotPlusChainRunner
+  // Helper function replicating the wiki/embedded-image matching the util performs
   async function extractEmbeddedImages(content: string, sourcePath?: string): Promise<string[]> {
     // Match wiki-style ![[image.ext]]
     const wikiImageRegex = /!\[\[(.*?\.(png|jpg|jpeg|gif|webp|bmp|svg))\]\]/g;

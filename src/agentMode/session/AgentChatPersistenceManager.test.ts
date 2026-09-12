@@ -8,6 +8,8 @@ import { TFile } from "obsidian";
 import type { App } from "obsidian";
 import { getSettings } from "@/settings/model";
 import { getEffectiveConversationsFolder } from "@/settings/copilotFolder";
+import { CHAT_ATTACHMENT_REF_SCHEMA_VERSION } from "./chatAttachmentRefs";
+import { MAX_CHAT_SOURCE_REFS, serializeChatSourceRefs } from "./chatSourceRefs";
 
 jest.mock("obsidian", () => ({
   Notice: jest.fn(),
@@ -99,6 +101,10 @@ function makeApp() {
   };
 }
 
+function attachmentRef(vaultId: string, attachmentId: string) {
+  return { schemaVersion: CHAT_ATTACHMENT_REF_SCHEMA_VERSION, vaultId, attachmentId } as const;
+}
+
 function makeMessage(sender: string, message: string, epoch = 1735732800000): AgentChatMessage {
   return {
     id: `msg-${epoch}`,
@@ -132,6 +138,253 @@ describe("AgentChatPersistenceManager", () => {
     expect(loaded.messages[0].message).toBe("hello world");
     expect(loaded.messages[1].sender).toBe(AI_SENDER);
     expect(loaded.messages[1].message).toBe("hi back");
+  });
+
+  it("round-trips bounded attachment references without serializing content arrays or image bytes", async () => {
+    const messages: AgentChatMessage[] = [
+      {
+        ...makeMessage(USER_SENDER, "attach this"),
+        localAttachmentRefs: [attachmentRef("vault-a", "att-1"), attachmentRef("vault-b", "att-2")],
+        content: [{ type: "image", data: "data:image/png;base64,not-persisted" }],
+      },
+    ];
+
+    const saved = await manager.saveSession(messages, "claude");
+    const raw = app.files.get(saved!.path)!.contents!;
+    const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
+
+    expect(raw).toContain("copilot-local-attachment-refs:v1");
+    expect(raw).toContain('"vaultId":"vault-a"');
+    expect(raw).not.toContain("data:image/png");
+    expect(raw).not.toContain('"content"');
+    expect(loaded.messages[0].message).toBe("attach this");
+    expect(loaded.messages[0].localAttachmentRefs).toEqual([
+      attachmentRef("vault-a", "att-1"),
+      attachmentRef("vault-b", "att-2"),
+    ]);
+  });
+
+  it("losslessly round-trips exact valid marker text with and without metadata refs", async () => {
+    const validMarker =
+      '<!-- copilot-local-attachment-refs:v1;metadata [{"schemaVersion":1,"vaultId":"vault-a","attachmentId":"att-literal"}] -->';
+    const literalText = ["before", "```markdown", validMarker, "```", "after", validMarker].join(
+      "\n"
+    );
+    const messages: AgentChatMessage[] = [
+      makeMessage(USER_SENDER, literalText, 1735732800000),
+      {
+        ...makeMessage(AI_SENDER, literalText, 1735732800001),
+        localAttachmentRefs: [attachmentRef("vault-a", "att-literal")],
+      },
+    ];
+
+    const first = await manager.saveSession(messages, "claude");
+    const firstRaw = app.files.get(first!.path)!.contents!;
+    const firstLoaded = await manager.loadFile(app.files.get(first!.path) as unknown as TFile);
+
+    expect(firstRaw.split("\n").filter((line) => line === validMarker)).toHaveLength(1);
+    expect(firstRaw).toContain("copilot-local-attachment-refs:v1;literal");
+    expect(firstLoaded.messages[0].message).toBe(literalText);
+    expect(firstLoaded.messages[0].localAttachmentRefs).toBeUndefined();
+    expect(firstLoaded.messages[1].message).toBe(literalText);
+    expect(firstLoaded.messages[1].localAttachmentRefs).toEqual([
+      attachmentRef("vault-a", "att-literal"),
+    ]);
+
+    const second = await manager.saveSession(firstLoaded.messages, "claude");
+    const secondLoaded = await manager.loadFile(app.files.get(second!.path) as unknown as TFile);
+    expect(secondLoaded.messages[0].message).toBe(literalText);
+    expect(secondLoaded.messages[1].message).toBe(literalText);
+    expect(secondLoaded.messages[1].localAttachmentRefs).toEqual([
+      attachmentRef("vault-a", "att-literal"),
+    ]);
+  });
+
+  it("persists only bounded source metadata from completed web tools and preserves it on resave", async () => {
+    const assistant: AgentChatMessage = {
+      ...makeMessage(AI_SENDER, "Answer with sources"),
+      localAttachmentRefs: [attachmentRef("vault-a", "att-source")],
+      parts: [
+        {
+          kind: "tool_call",
+          id: "web-1",
+          title: "web_search",
+          status: "completed",
+          input: { apiKey: "fc-secret-must-not-persist" },
+          output: [{ type: "text", text: "full provider response must not persist" }],
+          sourceReferences: [
+            {
+              title: "Provider docs",
+              path: "/private/vault/path.md",
+              score: 0.98,
+              explanation: { secret: "ranking detail must not persist" },
+              kind: "web",
+              url: "https://example.test/docs",
+              snippet: "Short public excerpt",
+              publishedAt: "2026-09-11",
+            },
+          ],
+        },
+      ],
+    };
+
+    const first = await manager.saveSession([assistant], "claude");
+    const firstRaw = app.files.get(first!.path)!.contents!;
+    expect(firstRaw).toContain("copilot-agent-source-refs:v1;metadata");
+    expect(firstRaw).toContain('"title":"Provider docs"');
+    expect(firstRaw).toContain('"url":"https://example.test/docs"');
+    expect(firstRaw).toContain('"snippet":"Short public excerpt"');
+    expect(firstRaw).toContain('"publishedAt":"2026-09-11"');
+    expect(firstRaw).not.toContain("fc-secret-must-not-persist");
+    expect(firstRaw).not.toContain("full provider response must not persist");
+    expect(firstRaw).not.toContain("/private/vault/path.md");
+    expect(firstRaw).not.toContain('"score"');
+    expect(firstRaw).not.toContain("ranking detail must not persist");
+
+    const firstLoaded = await manager.loadFile(app.files.get(first!.path) as unknown as TFile);
+    expect(firstLoaded.messages[0].sourceReferences).toEqual([
+      {
+        title: "Provider docs",
+        path: "https://example.test/docs",
+        score: 0,
+        kind: "web",
+        url: "https://example.test/docs",
+        snippet: "Short public excerpt",
+        publishedAt: "2026-09-11",
+      },
+    ]);
+    expect(firstLoaded.messages[0].localAttachmentRefs).toEqual([
+      attachmentRef("vault-a", "att-source"),
+    ]);
+
+    const second = await manager.saveSession(firstLoaded.messages, "claude");
+    const secondLoaded = await manager.loadFile(app.files.get(second!.path) as unknown as TFile);
+    expect(secondLoaded.messages[0].sourceReferences).toEqual(
+      firstLoaded.messages[0].sourceReferences
+    );
+  });
+
+  it.each(["x".repeat(2_000), "界".repeat(2_000)])(
+    "retains ordered citations when snippets exceed the byte bound and preserves them on resave (%#)",
+    async (snippet) => {
+      const sources = Array.from({ length: MAX_CHAT_SOURCE_REFS }, (_, index) => ({
+        title: `Search result ${index + 1}`,
+        path: `/private/search-result-${index + 1}.md`,
+        score: 1,
+        kind: "web" as const,
+        url: `https://example.test/search/${index + 1}`,
+        snippet,
+      }));
+      const assistant: AgentChatMessage = {
+        ...makeMessage(AI_SENDER, "Search results"),
+        parts: [
+          {
+            kind: "tool_call",
+            id: "web-many",
+            title: "web_search",
+            status: "completed",
+            sourceReferences: sources,
+          },
+        ],
+      };
+
+      const first = await manager.saveSession([assistant], "claude");
+      const firstRaw = app.files.get(first!.path)!.contents!;
+      const firstLoaded = await manager.loadFile(app.files.get(first!.path) as unknown as TFile);
+      const firstRefs = firstLoaded.messages[0].sourceReferences;
+
+      expect(firstRaw).toContain("copilot-agent-source-refs:v1;metadata");
+      expect(firstRaw).not.toContain('"snippet"');
+      expect(firstRefs).toHaveLength(MAX_CHAT_SOURCE_REFS);
+      expect(firstRefs?.map((ref) => ref.url)).toEqual(sources.map((source) => source.url));
+      expect(firstRefs?.every((ref) => ref.snippet === undefined)).toBe(true);
+
+      const second = await manager.saveSession(firstLoaded.messages, "claude");
+      const secondRaw = app.files.get(second!.path)!.contents!;
+      const secondLoaded = await manager.loadFile(app.files.get(second!.path) as unknown as TFile);
+
+      expect(secondRaw).toContain("copilot-agent-source-refs:v1;metadata");
+      expect(secondLoaded.messages[0].sourceReferences).toEqual(firstRefs);
+    }
+  );
+
+  it("does not persist sources from an unfinished tool call", async () => {
+    const assistant: AgentChatMessage = {
+      ...makeMessage(AI_SENDER, "Searching"),
+      parts: [
+        {
+          kind: "tool_call",
+          id: "web-pending",
+          title: "web_search",
+          status: "in_progress",
+          sourceReferences: [
+            {
+              title: "Partial result",
+              path: "https://example.test/partial",
+              score: 0,
+              kind: "web",
+              url: "https://example.test/partial",
+            },
+          ],
+        },
+      ],
+    };
+
+    const saved = await manager.saveSession([assistant], "claude");
+    const raw = app.files.get(saved!.path)!.contents!;
+    const loaded = await manager.loadFile(app.files.get(saved!.path) as unknown as TFile);
+    expect(raw).not.toContain("copilot-agent-source-refs:v1;metadata");
+    expect(loaded.messages[0].sourceReferences).toBeUndefined();
+  });
+
+  it("losslessly round-trips exact valid source-marker text for both senders", async () => {
+    const validMarker = serializeChatSourceRefs([
+      {
+        title: "Literal docs",
+        path: "https://example.test/literal",
+        score: 0,
+        kind: "web",
+        url: "https://example.test/literal",
+      },
+    ])!;
+    const literalText = ["before", validMarker].join("\n");
+    const first = await manager.saveSession(
+      [
+        makeMessage(USER_SENDER, literalText, 1735732800000),
+        makeMessage(AI_SENDER, literalText, 1735732800001),
+      ],
+      "claude"
+    );
+    const raw = app.files.get(first!.path)!.contents!;
+    expect(raw).toContain("copilot-agent-source-refs:v1;literal");
+
+    const loaded = await manager.loadFile(app.files.get(first!.path) as unknown as TFile);
+    expect(loaded.messages[0].message).toBe(literalText);
+    expect(loaded.messages[0].sourceReferences).toBeUndefined();
+    expect(loaded.messages[1].message).toBe(literalText);
+    expect(loaded.messages[1].sourceReferences).toBeUndefined();
+  });
+
+  it("keeps marker-like ordinary text inert during chat load", async () => {
+    const path = "test-folder/agent__marker-like.md";
+    const markerLike = "<!-- copilot-local-attachment-refs:v1 {not-json} -->";
+    await app.vault.adapter.write(
+      path,
+      [
+        "---",
+        "epoch: 1735732800000",
+        "mode: agent",
+        "backendId: claude",
+        "---",
+        "",
+        `**user**: ordinary text ${markerLike}`,
+        "[Timestamp: 2026/01/01 12:00:00]",
+      ].join("\n")
+    );
+
+    const loaded = await manager.loadFile(app.files.get(path) as unknown as TFile);
+    expect(loaded.messages[0].message).toContain(markerLike);
+    expect(loaded.messages[0].localAttachmentRefs).toBeUndefined();
   });
 
   it("writes under the folder captured at entry, not one a mid-save root change swaps in", async () => {
@@ -176,6 +429,7 @@ describe("AgentChatPersistenceManager", () => {
       message: "",
       isVisible: true,
       timestamp: { epoch: 2, display: "2026/01/01 12:00:00", fileName: "20260101_120000" },
+      localAttachmentRefs: [attachmentRef("vault-a", "att-fanout")],
       fanout: {
         answers: {
           opencode: { backendId: "opencode", status: "running", text: "partial opencode answer" },
@@ -191,6 +445,9 @@ describe("AgentChatPersistenceManager", () => {
     const file = app.files.get(saved!.path)!;
     const loaded = await manager.loadFile(file as unknown as TFile);
     expect(loaded.messages[1].message).toContain("partial opencode answer");
+    expect(loaded.messages[1].localAttachmentRefs).toEqual([
+      attachmentRef("vault-a", "att-fanout"),
+    ]);
   });
 
   it("escapes and round-trips a label containing quotes and backslashes", async () => {

@@ -34,12 +34,13 @@ import type { ChatHistoryItem } from "@/components/chat-components/ChatHistoryPo
 import { fileToHistoryItem, readChatPathProjectId } from "@/utils/chatHistoryUtils";
 import { readFrontmatterViaAdapter } from "@/utils/vaultAdapterUtils";
 import { App, FileSystemAdapter, Notice, Platform, TFile } from "obsidian";
+import type { MessageContext } from "@/types/message";
 import { v4 as uuidv4 } from "uuid";
 import { AgentSession, ATTENTION_TRIGGER_STATUSES, DEFAULT_TITLE_PREFIX } from "./AgentSession";
 import type { AgentChatPersistenceManager } from "./AgentChatPersistenceManager";
 import type { AgentModelPreloader } from "./AgentModelPreloader";
 import { buildNativeChatId, parseNativeChatId } from "@/utils/nativeChatId";
-import { CHAT_AGENT_VIEWTYPE } from "@/constants";
+import { CHAT_AGENT_VIEWTYPE, USER_SENDER } from "@/constants";
 import { playNotificationSound } from "@/utils/notificationSound";
 import type { AgentSessionIndex } from "./AgentSessionIndex";
 import {
@@ -49,6 +50,14 @@ import {
 } from "./chatHistoryMerge";
 import { MethodUnsupportedError } from "./errors";
 import { replayPersistedMode } from "./replayPersistedMode";
+import {
+  agentScopeSignature,
+  agentScopeWorkspaceRoot,
+  computeAgentScope,
+  getActiveAgentScope,
+  setActiveAgentScope,
+  type AgentScope,
+} from "./agentScope";
 import {
   FanoutOrchestrator,
   type FanoutHost,
@@ -200,6 +209,24 @@ function upsertFailedItem(list: FailedItem[], failure: FailedItem): FailedItem[]
   return [...list.filter((f) => !(f.path === failure.path && f.type === failure.type)), failure];
 }
 
+/** Whether a message carries the explicit @note/@folder selection a sandbox is built from. */
+function hasSelectionContext(context?: MessageContext): boolean {
+  return (context?.notes?.length ?? 0) > 0 || (context?.folders?.length ?? 0) > 0;
+}
+
+/**
+ * Whether `child` is `parent` itself or lives under it. Separator-tolerant so
+ * a POSIX-joined vault-relative root still compares against an OS-joined
+ * project cwd on Windows.
+ */
+function isPathInside(child: string, parent: string): boolean {
+  const norm = (p: string) => p.replace(/[/\\]+$/, "").replace(/\\/g, "/");
+  const base = norm(parent);
+  if (!base) return false;
+  const target = norm(child);
+  return target === base || target.startsWith(`${base}/`);
+}
+
 export type PermissionPrompter = (req: PermissionPrompt) => Promise<PermissionDecision>;
 
 /**
@@ -261,6 +288,12 @@ export interface AgentSessionManagerOptions {
 export class AgentSessionManager {
   private backends = new Map<BackendId, BackendProcess>();
   private starting = new Map<BackendId, Promise<BackendProcess>>();
+  // A start can be waiting on an uncancellable backend promise (descriptor
+  // construction, ACP initialize, or an adapter's own startup). Keep the
+  // logical cancellation and the still-unadopted process stop separately so
+  // shutdown never has to await the start promise itself.
+  private readonly startingCancels = new Map<BackendId, () => void>();
+  private readonly startingStops = new Map<BackendId, () => Promise<void>>();
   private sessions = new Map<string, AgentSession>();
   private chatUIStates = new Map<string, AgentChatUIState>();
   private activeSessionId: string | null = null;
@@ -382,6 +415,9 @@ export class AgentSessionManager {
       unsub?: () => void;
       signature?: string;
       attentionUnsub?: () => void;
+      scopeUnsub?: () => void;
+      /** The vault-selection sandbox this session's first turn established. */
+      scope?: AgentScope | null;
     }
   >();
 
@@ -417,9 +453,10 @@ export class AgentSessionManager {
     }
     this.preloader = opts.modelPreloader;
     this.fanoutOrchestrator = new FanoutOrchestrator(this.createFanoutHost());
-    this.settingsUnsub = subscribeToSettingsChange((prev, next) =>
-      this.onDefaultSelectionsChanged(prev, next)
-    );
+    this.settingsUnsub = subscribeToSettingsChange((prev, next) => {
+      this.onDefaultSelectionsChanged(prev, next);
+      this.onAgentScopeModeChanged(prev.agentScopeMode, next.agentScopeMode);
+    });
     this.contentTracker = new ProjectContentTracker(this.app);
     this.contentTrackerUnsubscribe = this.contentTracker.onContentChanged((projectId) =>
       this.markProjectContextDirty(projectId)
@@ -452,6 +489,24 @@ export class AgentSessionManager {
       const descriptor = this.opts.resolveDescriptor(backendId);
       if (!descriptor) continue;
       this.enqueueDefaultApply(session, descriptor);
+    }
+  }
+
+  /**
+   * The sandbox mode turning off must not leave the last selection confined:
+   * drop the sticky scope so the next session-open and the next backend spawn
+   * are vault-wide again. Spawn-time configs (codex CODEX_CONFIG / opencode
+   * OPENCODE_CONFIG_CONTENT) are rebuilt on each backend's next natural
+   * restart; wiring a dedicated restart for the mode toggle is the settings
+   * surface's concern, not the manager's.
+   */
+  private onAgentScopeModeChanged(prevMode: unknown, nextMode: unknown): void {
+    if (
+      prevMode === "selected-context" &&
+      nextMode !== "selected-context" &&
+      getActiveAgentScope()
+    ) {
+      setActiveAgentScope(null);
     }
   }
 
@@ -1227,6 +1282,13 @@ export class AgentSessionManager {
     // and validates desktop/orphaned up front, before any pending-create state
     // is mutated.
     const cwd = this.resolveSessionCwd(projectId);
+    // When the vault-selection sandbox is active, the session opens inside the
+    // selection's common root instead — that cwd IS the workspace-write
+    // boundary the ACP backends enforce. Materialization below deliberately
+    // keeps the natural `cwd` (snapshot storage + AGENTS.md anchors stay put);
+    // only the backend session's cwd narrows.
+    const activeScope = getActiveAgentScope();
+    const scopedCwd = this.applyAgentScopeCwd(cwd, activeScope);
 
     // Kick off context materialization WITHOUT blocking session creation: the
     // session must become visible immediately so the composer's loading card +
@@ -1296,12 +1358,16 @@ export class AgentSessionManager {
     const resolvedChatInputId = chatInputId ?? uuidv4();
     const session = AgentSession.start({
       backend,
-      cwd,
+      cwd: scopedCwd,
       internalId,
       chatInputId: resolvedChatInputId,
       backendId: resolvedId,
       projectId,
       defaultModelSelection: resolvedSeed,
+      // The sticky vault-selection sandbox, when one is active. ACP backends
+      // confine via the narrowed cwd above; the SDK adapter reads the scope
+      // directly from the open input / the session record.
+      ...(activeScope ? { scope: activeScope } : {}),
       getDescriptor: () => this.opts.resolveDescriptor(resolvedId),
       runFanoutTurn: (input) => this.runFanoutTurn(input),
       getDisplayName: (backendId) => this.resolveDescriptor(backendId).displayName,
@@ -1342,6 +1408,7 @@ export class AgentSessionManager {
     }
     this.attachAutoSave(session);
     this.attachAttentionTracking(session);
+    this.attachScopeTracking(session);
     this.notify();
 
     // Seed the delivery cursor as soon as the project's context is MATERIALIZED —
@@ -2744,6 +2811,19 @@ export class AgentSessionManager {
       `[AgentMode] shutdown (pool size=${this.sessions.size}, backends=${this.backends.size})`
     );
 
+    // Cancel logical starts synchronously, then stop any fresh process that was
+    // created but not adopted. Do not await `this.starting`: its promise may be
+    // waiting on a backend start that has no cancellation mechanism. The
+    // preloader owns warm/probe processes and exposes its own quiescence promise
+    // (older test doubles return void, which Promise.resolve also accepts).
+    for (const cancel of this.startingCancels.values()) cancel();
+    const pendingBackendStops = Array.from(this.startingStops.values());
+    const preloaderShutdown = Promise.resolve(this.preloader.shutdown());
+    await Promise.allSettled([
+      preloaderShutdown,
+      ...pendingBackendStops.map((stop) => Promise.resolve().then(stop)),
+    ]);
+
     const allSessions = Array.from(this.sessions.values());
     // Drain pending auto-saves for every session before disposing — same
     // reasoning as `closeSession`. Done before the per-session unsubscribe so
@@ -2792,10 +2872,11 @@ export class AgentSessionManager {
     );
     this.backends.clear();
     this.starting.clear();
+    this.startingCancels.clear();
+    this.startingStops.clear();
     this.startingBackendId = null;
     this.listeners.clear();
     this.preloadStatus.clear();
-    this.preloader.shutdown();
     // Push any debounced index write to disk before the plugin unloads.
     await this.opts.sessionIndex?.flush();
   }
@@ -3406,6 +3487,7 @@ export class AgentSessionManager {
     if (state.indexTimer) window.clearTimeout(state.indexTimer);
     state.unsub?.();
     state.attentionUnsub?.();
+    state.scopeUnsub?.();
     this.sessionState.delete(internalId);
   }
 
@@ -3467,6 +3549,123 @@ export class AgentSessionManager {
   }
 
   /**
+   * Watch `session`'s messages so the FIRST user message carrying explicit
+   * @note/@folder context establishes the session's vault-selection sandbox
+   * (see `agentScope.ts`). Fresh sessions only: a resumed conversation was
+   * already scoped by its original first turn, and its backend session cannot
+   * be re-opened with a new sandbox.
+   *
+   * When the computed scope differs from the sticky one, it becomes the new
+   * sticky scope and the backend is queued for a deferred restart, because the
+   * ACP backends bake their sandbox (cwd aside) into spawn-time config — the
+   * same staleness contract `restartOnSystemPromptChange` exists for.
+   */
+  private attachScopeTracking(session: AgentSession): void {
+    const unsubscribe = session.subscribe({
+      onMessagesChanged: () => this.captureFirstTurnAgentScope(session),
+      onStatusChanged: () => {},
+    });
+    this.getSessionState(session.internalId).scopeUnsub = unsubscribe;
+  }
+
+  /**
+   * Compute and record the sandbox for `session`'s first turn from its first
+   * user message with an explicit selection, or record `null` (no selection →
+   * sticky scope unchanged, vault-wide stays in force) — but only once per
+   * session, and only while the sandbox mode is on.
+   */
+  private captureFirstTurnAgentScope(session: AgentSession): void {
+    if (this.disposed) return;
+    if (getSettings().agentScopeMode !== "selected-context") return;
+    const state = this.getSessionState(session.internalId);
+    if (state.scope !== undefined) return;
+    const vaultRoot = this.vaultBasePath();
+    if (vaultRoot === null) return;
+    const first = session.store
+      .getDisplayMessages()
+      .find((message) => message.sender === USER_SENDER && hasSelectionContext(message.context));
+    if (!first) return;
+    // Mark computed FIRST: a selection arriving with a later message must not
+    // re-run this (the session has already opened; the sandbox shape is fixed
+    // for its lifetime), and listeners fire per streamed chunk.
+    state.scope = null;
+    const scope = computeAgentScope(
+      { contextNotes: first.context?.notes, contextFolders: first.context?.folders },
+      vaultRoot,
+      { availableFilePaths: this.app.vault.getFiles().map((file) => file.path) }
+    );
+    if (!scope) return;
+    state.scope = scope;
+    session.setAgentScope(scope);
+    // React only to a CHANGED selection: two first turns over the same
+    // selection must not churn the backend for identical spawn config.
+    const previous = getActiveAgentScope();
+    setActiveAgentScope(scope);
+    if (!previous || agentScopeSignature(previous) !== agentScopeSignature(scope)) {
+      this.queueAgentScopeBackendRestart(session.backendId);
+    }
+  }
+
+  /**
+   * Queue a deferred restart for backends whose spawn-time config embeds the
+   * sandbox (codex `CODEX_CONFIG`, opencode `OPENCODE_CONFIG_CONTENT`) —
+   * exactly the backends that already declare spawn-config staleness via
+   * `restartOnSystemPromptChange`. The SDK adapter resolves its sandbox per
+   * turn and needs no restart. Default deferral keeps an in-flight turn intact.
+   */
+  private queueAgentScopeBackendRestart(backendId: BackendId): void {
+    if (!this.opts.resolveDescriptor(backendId)?.restartOnSystemPromptChange) return;
+    void this.restartBackend(backendId, "agent scope changed").catch((e) =>
+      logWarn(`[AgentMode] agent-scope restart failed for ${backendId}`, e)
+    );
+  }
+
+  /** This session's vault-selection sandbox, or null when none applies. */
+  getAgentScope(internalId: string): AgentScope | null {
+    return this.sessionState.get(internalId)?.scope ?? null;
+  }
+
+  /**
+   * Backend-session-id variant for in-process adapters that key enforcement by
+   * the backend's own session id (Claude SDK permission bridge). Unknown ids
+   * resolve to null (ungated) rather than guessing a session.
+   */
+  getAgentScopeByBackendSession(backendSessionId: SessionId): AgentScope | null {
+    for (const [internalId, session] of this.sessions) {
+      if (session.getBackendSessionId() === backendSessionId) {
+        return this.getAgentScope(internalId);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Narrow `naturalCwd` to the sticky scope's workspace root when the root
+   * lies inside it. A selection outside the natural cwd (a project session
+   * whose selection reaches past the project folder) keeps the natural cwd —
+   * re-homing the session would move its AGENTS.md discovery and its
+   * materialized-context storage — and the scope still rides the open input
+   * for consumers that enforce it without cwd.
+   */
+  private applyAgentScopeCwd(naturalCwd: string, scope: AgentScope | null): string {
+    if (!scope) return naturalCwd;
+    const vaultRoot = this.vaultBasePath();
+    if (vaultRoot === null) return naturalCwd;
+    const root = agentScopeWorkspaceRoot(scope, vaultRoot);
+    if (root === naturalCwd || !isPathInside(root, naturalCwd)) return naturalCwd;
+    logInfo(
+      `[AgentMode] agent scope confines the session workspace to ${root} (natural cwd ${naturalCwd})`
+    );
+    return root;
+  }
+
+  /** Absolute vault root on desktop, or null off-desktop (no FileSystemAdapter). */
+  private vaultBasePath(): string | null {
+    const adapter = this.app.vault.adapter;
+    return adapter instanceof FileSystemAdapter ? adapter.getBasePath() : null;
+  }
+
+  /**
    * Register the session-domain prompters on a freshly-adopted backend. The
    * permission prompter is required; the ask-question prompter is wired only
    * when both the manager was configured with one and the backend advertises
@@ -3483,6 +3682,19 @@ export class AgentSessionManager {
   }
 
   /**
+   * A process created by an in-flight ensure is not manager-owned until its
+   * backend has been wired and inserted into `backends`. Shutdown races must
+   * reclaim that orphan without hiding the original startup error.
+   */
+  private async abandonBackendProcess(proc: BackendProcess): Promise<void> {
+    try {
+      await proc.shutdown();
+    } catch (error) {
+      logError("[AgentMode] abandoned backend shutdown failed", error);
+    }
+  }
+
+  /**
    * Obtain a running backend process from manager ownership, an in-flight
    * spawn, a warm probe process, or a fresh spawn. Warm process adoption never
    * adopts the probe session; callers open or resume their own session.
@@ -3491,47 +3703,107 @@ export class AgentSessionManager {
     backendId: BackendId,
     descriptor: BackendDescriptor
   ): Promise<BackendProcess> {
+    if (this.disposed) throw new Error("AgentSessionManager has been shut down");
     const existing = this.backends.get(backendId);
     if (existing && existing.isRunning()) return existing;
     const inflight = this.starting.get(backendId);
     if (inflight) return inflight;
+
+    let startCancelled = false;
+    let rejectStartCancellation!: (reason: Error) => void;
+    const startCancellation = new Promise<never>((_, reject) => {
+      rejectStartCancellation = reject;
+    });
+    // In-process adapters may complete without ever awaiting the cancellation
+    // race. Keep a rejection observer attached for that path as well.
+    void startCancellation.catch(() => undefined);
+    const cancelStart = (): void => {
+      if (startCancelled) return;
+      startCancelled = true;
+      rejectStartCancellation(new Error("AgentSessionManager has been shut down"));
+    };
+    this.startingCancels.set(backendId, cancelStart);
+
+    let stopPromise: Promise<void> | null = null;
+    const stopUnadoptedProcess = (proc: BackendProcess): Promise<void> => {
+      if (!stopPromise) stopPromise = this.abandonBackendProcess(proc);
+      return stopPromise;
+    };
+
     const startPromise = (async () => {
       // A plugin-load probe owns the only process for this backend until it
       // settles. Await that same deduped probe so a user selection cannot race
       // it and spawn a second process before the warm entry exists.
       if (!this.isPreloadReady(backendId)) {
-        await this.preloader.preload(backendId);
+        await Promise.race([this.preloader.preload(backendId), startCancellation]);
+      }
+      if (this.disposed || startCancelled) {
+        throw new Error("AgentSessionManager has been shut down");
       }
 
       const warm = this.preloader.takeWarm(backendId);
       if (warm) {
-        // Probe subprocess is already started + initialize-handshaken —
-        // wire it into the manager without paying either cost again.
-        this.wirePrompters(warm.proc);
-        this.installBackendExitHandler(backendId, warm.proc, descriptor);
-        this.backends.set(backendId, warm.proc);
-        return warm.proc;
+        try {
+          if (this.disposed) throw new Error("AgentSessionManager has been shut down");
+          // Probe subprocess is already started + initialize-handshaken —
+          // wire it into the manager without paying either cost again.
+          this.wirePrompters(warm.proc);
+          this.installBackendExitHandler(backendId, warm.proc, descriptor);
+          if (this.disposed) throw new Error("AgentSessionManager has been shut down");
+          this.backends.set(backendId, warm.proc);
+          this.startingCancels.delete(backendId);
+          return warm.proc;
+        } catch (error) {
+          await this.abandonBackendProcess(warm.proc);
+          throw error;
+        }
       }
 
+      if (this.disposed || startCancelled) {
+        throw new Error("AgentSessionManager has been shut down");
+      }
       const proc = descriptor.createBackendProcess({
         plugin: this.plugin,
         app: this.app,
         clientVersion: this.plugin.manifest.version,
         descriptor,
+        getSessionScope: (backendSessionId) => this.getAgentScopeByBackendSession(backendSessionId),
       });
-      // ACP backends declare `start()` to spawn the subprocess and run the
-      // initialize handshake. In-process adapters (Claude SDK) omit it.
-      if (proc.start) await proc.start();
-      this.wirePrompters(proc);
-      this.installBackendExitHandler(backendId, proc, descriptor);
-      this.backends.set(backendId, proc);
-      return proc;
+      let adopted = false;
+      try {
+        // ACP backends declare `start()` to spawn the subprocess and run the
+        // initialize handshake. In-process adapters (Claude SDK) omit it.
+        // Register ownership before awaiting start: if this promise never
+        // settles, shutdown can still stop the child and cancel adoption.
+        this.startingStops.set(backendId, () => stopUnadoptedProcess(proc));
+        if (proc.start) await Promise.race([proc.start(), startCancellation]);
+        if (this.disposed || startCancelled) {
+          throw new Error("AgentSessionManager has been shut down");
+        }
+        this.wirePrompters(proc);
+        this.installBackendExitHandler(backendId, proc, descriptor);
+        if (this.disposed || startCancelled) {
+          throw new Error("AgentSessionManager has been shut down");
+        }
+        this.backends.set(backendId, proc);
+        adopted = true;
+        // Once manager ownership is established, shutdown must use the normal
+        // backend snapshot rather than the unadopted-process stop handle.
+        this.startingCancels.delete(backendId);
+        this.startingStops.delete(backendId);
+        return proc;
+      } catch (error) {
+        if (!adopted) await stopUnadoptedProcess(proc);
+        throw error;
+      }
     })();
     this.starting.set(backendId, startPromise);
     try {
       return await startPromise;
     } finally {
       this.starting.delete(backendId);
+      this.startingCancels.delete(backendId);
+      this.startingStops.delete(backendId);
     }
   }
 

@@ -58,26 +58,26 @@ describe("partitionCandidates", () => {
   ];
 
   it("opencode: BYOK rows + opencode agent-origin rows; excludes other agents", () => {
-    const { byokPlusCandidates, agentOriginCandidates } = partitionCandidates(
+    const { byokCandidates, agentOriginCandidates } = partitionCandidates(
       models,
       providers,
       new Set(),
       "opencode",
       true
     );
-    expect(byokPlusCandidates.map((c) => c.configuredModel.configuredModelId)).toEqual(["m-byok"]);
+    expect(byokCandidates.map((c) => c.configuredModel.configuredModelId)).toEqual(["m-byok"]);
     expect(agentOriginCandidates.map((c) => c.configuredModel.configuredModelId)).toEqual(["m-oc"]);
   });
 
   it("codex: only this agent's agent-origin rows, no BYOK", () => {
-    const { byokPlusCandidates, agentOriginCandidates } = partitionCandidates(
+    const { byokCandidates, agentOriginCandidates } = partitionCandidates(
       models,
       providers,
       new Set(),
       "codex",
       false
     );
-    expect(byokPlusCandidates).toHaveLength(0);
+    expect(byokCandidates).toHaveLength(0);
     expect(agentOriginCandidates.map((c) => c.configuredModel.configuredModelId)).toEqual([
       "m-codex",
     ]);
@@ -94,7 +94,7 @@ describe("partitionCandidates", () => {
     expect(agentOriginCandidates[0].enabled).toBe(true);
   });
 
-  it("opencode: drops BYOK/Plus providers the routability predicate rejects (dead-toggle guard)", () => {
+  it("opencode: drops BYOK providers the routability predicate rejects (dead-toggle guard)", () => {
     // A BYOK provider with no catalog back-reference is
     // unroutable by opencode; the predicate rejects it so it never renders.
     const unroutable: Provider = {
@@ -111,7 +111,7 @@ describe("partitionCandidates", () => {
     const allModels = [...models, model("m-google", "byok-google", "gemini-3-flash")];
     const isRoutable = (p: Provider): boolean =>
       p.origin.kind === "byok" ? Boolean(p.origin.catalogProviderId) : true;
-    const { byokPlusCandidates } = partitionCandidates(
+    const { byokCandidates } = partitionCandidates(
       allModels,
       withUnroutable,
       new Set(),
@@ -120,10 +120,10 @@ describe("partitionCandidates", () => {
       isRoutable
     );
     // Only the routable BYOK provider survives; the catalog-less row is dropped.
-    expect(byokPlusCandidates.map((c) => c.configuredModel.configuredModelId)).toEqual(["m-byok"]);
+    expect(byokCandidates.map((c) => c.configuredModel.configuredModelId)).toEqual(["m-byok"]);
   });
 
-  it("opencode: keeps every BYOK/Plus provider when no routability predicate is given", () => {
+  it("opencode: keeps every BYOK provider when no routability predicate is given", () => {
     const unroutable: Provider = {
       providerId: "byok-google",
       providerType: "google",
@@ -132,14 +132,14 @@ describe("partitionCandidates", () => {
       addedAt: 0,
     };
     const allModels = [...models, model("m-google", "byok-google", "gemini-3-flash")];
-    const { byokPlusCandidates } = partitionCandidates(
+    const { byokCandidates } = partitionCandidates(
       allModels,
       { ...providers, [unroutable.providerId]: unroutable },
       new Set(),
       "opencode",
       true
     );
-    expect(byokPlusCandidates.map((c) => c.configuredModel.configuredModelId).sort()).toEqual([
+    expect(byokCandidates.map((c) => c.configuredModel.configuredModelId).sort()).toEqual([
       "m-byok",
       "m-google",
     ]);
@@ -147,14 +147,14 @@ describe("partitionCandidates", () => {
 
   it("skips models whose provider row is missing", () => {
     const orphan = [model("orphan", "missing-provider", "x")];
-    const { byokPlusCandidates, agentOriginCandidates } = partitionCandidates(
+    const { byokCandidates, agentOriginCandidates } = partitionCandidates(
       orphan,
       providers,
       new Set(),
       "opencode",
       true
     );
-    expect(byokPlusCandidates).toHaveLength(0);
+    expect(byokCandidates).toHaveLength(0);
     expect(agentOriginCandidates).toHaveLength(0);
   });
 });
@@ -337,7 +337,7 @@ describe("buildModelEnableGroups", () => {
 
   it("opencode: BYOK group plus opencode-only sub-groups derived from the wire prefix", () => {
     const partition = {
-      byokPlusCandidates: [
+      byokCandidates: [
         {
           configuredModel: model("m-byok", "byok-1", "claude-sonnet-4-5"),
           provider: byok,
@@ -357,7 +357,7 @@ describe("buildModelEnableGroups", () => {
         },
       ],
     };
-    const groups = buildModelEnableGroups(partition, true, "", false);
+    const groups = buildModelEnableGroups(partition, true, "");
     const byokGroup = groups.find((g) => g.key === "byok:byok-1");
     expect(byokGroup?.label).toBe("Anthropic");
 
@@ -369,7 +369,7 @@ describe("buildModelEnableGroups", () => {
 
   it("filters rows by the search query and drops empty groups", () => {
     const partition = {
-      byokPlusCandidates: [],
+      byokCandidates: [],
       agentOriginCandidates: [
         {
           configuredModel: model("m-oc1", "oc-agent", "opencode/big-pickle"),
@@ -383,7 +383,7 @@ describe("buildModelEnableGroups", () => {
         },
       ],
     };
-    const groups = buildModelEnableGroups(partition, true, "pickle", false);
+    const groups = buildModelEnableGroups(partition, true, "pickle");
     expect(groups.map((g) => g.label)).toEqual(["opencode"]);
     expect(groups[0].rows.map((r) => r.id)).toEqual(["m-oc1"]);
   });
@@ -391,7 +391,7 @@ describe("buildModelEnableGroups", () => {
   it("claude/codex: agent-origin rows render as a single provider group", () => {
     const codexAgent = agentProvider("codex-agent", "codex", "Codex");
     const partition = {
-      byokPlusCandidates: [],
+      byokCandidates: [],
       agentOriginCandidates: [
         {
           configuredModel: model("m-codex", "codex-agent", "gpt-5"),
@@ -400,117 +400,23 @@ describe("buildModelEnableGroups", () => {
         },
       ],
     };
-    const groups = buildModelEnableGroups(partition, false, "", false);
+    const groups = buildModelEnableGroups(partition, false, "");
     expect(groups).toHaveLength(1);
     expect(groups[0].label).toBe("Codex");
   });
 
-  it("synthesizes a locked Copilot group for opencode when no Copilot provider is registered", () => {
+  it("badges origins when the list mixes origins (opencode)", () => {
+    const openrouter = byokProvider("byok-or", "OpenRouter");
     const partition = {
-      byokPlusCandidates: [
-        {
-          configuredModel: model("m-byok", "byok-1", "claude-sonnet-4-5"),
-          provider: byok,
-          enabled: true,
-        },
-      ],
-      agentOriginCandidates: [],
-    };
-
-    const groups = buildModelEnableGroups(partition, true, "", true);
-
-    // Same position, badge, and tooltip a licensed user's group gets — only the
-    // rows differ, and only by being unusable.
-    expect(groups[0].label).toBe("Copilot");
-    expect(groups[0].badge).toBe("privacy");
-    expect(groups[0].tooltip).toBe("Copilot license required");
-    expect(groups[0].highlight).toBe(true);
-    expect(groups[0].rows.length).toBeGreaterThan(0);
-    expect(groups[0].rows.every((row) => row.locked && !row.enabled)).toBe(true);
-  });
-
-  it("adds no locked group once a Copilot provider is registered, whether or not it has rows yet", () => {
-    const plusProvider: Provider = {
-      providerId: "plus-1",
-      providerType: "openai-compatible",
-      displayName: "Copilot",
-      origin: { kind: "copilot-plus" },
-      addedAt: 0,
-    };
-    const partition = {
-      byokPlusCandidates: [
-        {
-          configuredModel: model("m-plus", "plus-1", "copilot-plus-flash"),
-          provider: plusProvider,
-          enabled: true,
-        },
-      ],
-      agentOriginCandidates: [],
-    };
-
-    const withRows = buildModelEnableGroups(partition, true, "", false);
-    // Registering the provider and reconciling its models are separate writes, so
-    // a licensed user can hold the provider with nothing under it. Inferring the
-    // lock from the groups built here told exactly that user a license was
-    // required, over eight toggles they had already paid for.
-    const beforeRows = buildModelEnableGroups(
-      { byokPlusCandidates: [], agentOriginCandidates: [] },
-      true,
-      "",
-      false
-    );
-
-    expect(withRows.filter((g) => g.label === "Copilot")).toHaveLength(1);
-    expect(withRows[0].rows.every((row) => row.locked)).toBe(false);
-    expect(beforeRows).toHaveLength(0);
-  });
-
-  it("adds no locked group for an agent that cannot route Copilot models", () => {
-    const partition = {
-      byokPlusCandidates: [],
-      agentOriginCandidates: [
-        {
-          configuredModel: model("m-cx", "cx-agent", "gpt-5-codex"),
-          provider: agentProvider("cx-agent", "codex", "Codex"),
-          enabled: true,
-        },
-      ],
-    };
-
-    const groups = buildModelEnableGroups(partition, false, "", true);
-
-    expect(groups.some((g) => g.rows.some((row) => row.locked))).toBe(false);
-  });
-
-  it("filters the locked rows by the search query like any others", () => {
-    const empty = { byokPlusCandidates: [], agentOriginCandidates: [] };
-
-    const matching = buildModelEnableGroups(empty, true, "flash", true);
-    const missing = buildModelEnableGroups(empty, true, "no-such-model", true);
-
-    expect(matching[0].rows.length).toBeGreaterThan(0);
-    expect(matching[0].rows.every((row) => /flash/i.test(row.label + row.wireId))).toBe(true);
-    expect(missing).toHaveLength(0);
-  });
-
-  it("badges non-Plus origins when the list mixes origins (opencode)", () => {
-    const plusProvider: Provider = {
-      providerId: "plus-1",
-      providerType: "anthropic",
-      displayName: "Copilot Plus",
-      origin: { kind: "copilot-plus" },
-      addedAt: 0,
-    };
-    const partition = {
-      byokPlusCandidates: [
+      byokCandidates: [
         {
           configuredModel: model("m-byok", "byok-1", "claude-sonnet-4-5"),
           provider: byok,
           enabled: true,
         },
         {
-          configuredModel: model("m-plus", "plus-1", "gpt-5"),
-          provider: plusProvider,
+          configuredModel: model("m-or", "byok-or", "gpt-5"),
+          provider: openrouter,
           enabled: false,
         },
       ],
@@ -522,54 +428,16 @@ describe("buildModelEnableGroups", () => {
         },
       ],
     };
-    const groups = buildModelEnableGroups(partition, true, "", false);
+    const groups = buildModelEnableGroups(partition, true, "");
     expect(groups.find((g) => g.key === "byok:byok-1")?.badge).toBe("BYOK");
+    expect(groups.find((g) => g.key === "byok:byok-or")?.badge).toBe("BYOK");
     expect(groups.find((g) => g.label === "opencode")?.badge).toBe("Agent Provided");
-  });
-
-  it("floats Copilot Plus to the top, highlights it, and gives it the privacy badge + license tooltip", () => {
-    const plusProvider: Provider = {
-      providerId: "plus-1",
-      providerType: "anthropic",
-      displayName: "Copilot Plus",
-      origin: { kind: "copilot-plus" },
-      addedAt: 0,
-    };
-    const partition = {
-      byokPlusCandidates: [
-        {
-          configuredModel: model("m-byok", "byok-1", "claude-sonnet-4-5"),
-          provider: byok,
-          enabled: true,
-        },
-        {
-          configuredModel: model("m-plus", "plus-1", "gpt-5"),
-          provider: plusProvider,
-          enabled: false,
-        },
-      ],
-      agentOriginCandidates: [
-        {
-          configuredModel: model("m-oc", "oc-agent", "opencode/big-pickle"),
-          provider: ocAgent,
-          enabled: false,
-        },
-      ],
-    };
-    const groups = buildModelEnableGroups(partition, true, "", false);
-    // Copilot Plus is first regardless of candidate order.
-    expect(groups[0].key).toBe("byok:plus-1");
-    expect(groups[0].highlight).toBe(true);
-    expect(groups[0].badge).toBe("privacy");
-    expect(groups[0].tooltip).toBe("Copilot license required");
-    // Non-Plus groups are not highlighted.
-    expect(groups.find((g) => g.key === "byok:byok-1")?.highlight).toBeUndefined();
   });
 
   it("omits badges when the list has a single origin (claude/codex)", () => {
     const codexAgent = agentProvider("codex-agent", "codex", "Codex");
     const partition = {
-      byokPlusCandidates: [],
+      byokCandidates: [],
       agentOriginCandidates: [
         {
           configuredModel: model("m-codex", "codex-agent", "gpt-5"),
@@ -578,7 +446,7 @@ describe("buildModelEnableGroups", () => {
         },
       ],
     };
-    const groups = buildModelEnableGroups(partition, false, "", false);
+    const groups = buildModelEnableGroups(partition, false, "");
     expect(groups[0].badge).toBeUndefined();
   });
 });

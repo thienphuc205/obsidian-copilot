@@ -306,22 +306,27 @@ export class ChatManager {
         await this.getSystemPromptForMessage(chainType, this.plugin.app.vault, activeNote);
 
       // Process context to generate LLM content
-      const { processedContent, contextEnvelope } = await this.contextManager.processMessageContext(
-        this.plugin.app,
-        message,
-        this.fileParserManager,
-        this.plugin.app.vault,
-        chainType,
-        includeActiveNote,
-        activeNote,
-        this.messageRepo, // Pass MessageRepository for L2 building
-        systemPrompt,
-        systemPromptIncludedFiles,
-        updateLoadingMessage
-      );
+      const { processedContent, contextEnvelope, sources } =
+        await this.contextManager.processMessageContext(
+          this.plugin.app,
+          message,
+          this.fileParserManager,
+          this.plugin.app.vault,
+          chainType,
+          includeActiveNote,
+          activeNote,
+          this.messageRepo, // Pass MessageRepository for L2 building
+          systemPrompt,
+          systemPromptIncludedFiles,
+          updateLoadingMessage
+        );
 
       // Update the processed content
-      this.messageRepo.updateProcessedText(messageId, processedContent, contextEnvelope);
+      if (sources !== undefined) {
+        this.messageRepo.updateProcessedText(messageId, processedContent, contextEnvelope, sources);
+      } else {
+        this.messageRepo.updateProcessedText(messageId, processedContent, contextEnvelope);
+      }
 
       logInfo(`[ChatManager] Successfully sent message ${messageId}`);
       return messageId;

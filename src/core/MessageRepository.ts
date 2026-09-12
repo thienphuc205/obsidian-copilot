@@ -1,4 +1,5 @@
 import { PromptContextEnvelope } from "@/context/PromptContextTypes";
+import type { SourceReference } from "@/context/sourceReferences";
 import { MessageContent } from "@/imageProcessing/imageProcessor";
 import { formatDateTime } from "@/utils";
 import { ChatMessage, MessageContext, NewChatMessage, StoredMessage } from "@/types/message";
@@ -139,7 +140,8 @@ export class MessageRepository {
   updateProcessedText(
     id: string,
     processedText: string,
-    contextEnvelope?: PromptContextEnvelope
+    contextEnvelope?: PromptContextEnvelope,
+    sources?: readonly SourceReference[]
   ): boolean {
     const message = this.messages.find((msg) => msg.id === id);
     if (!message) {
@@ -150,6 +152,9 @@ export class MessageRepository {
     // TRANSITIONAL: Update both for backward compatibility
     message.processedText = processedText;
     message.contextEnvelope = contextEnvelope;
+    if (sources !== undefined) {
+      message.sources = [...sources];
+    }
     logInfo(`[MessageRepository] Updated processed text for message ${id}`);
     return true;
   }

@@ -2,7 +2,9 @@ import type { AgentSessionManager, SkillManager } from "@/agentMode";
 // Deep import (not the barrel): these run on the load path for every
 // platform, and the barrel pulls Node-only modules that crash mobile.
 import { isNativeChatId, parseNativeChatId } from "@/utils/nativeChatId";
-import { BrevilabsClient } from "@/LLMProviders/brevilabsClient";
+// Transitional seam only: the document parser still constructs its own relay
+// client (the plugin no longer owns one). Once the hosted relay PDF parser is
+// removed from `FileParserManager`, this import goes away with it.
 import ChainOwner from "@/LLMProviders/chainOwner";
 import { CustomModel, setSelectedTextContexts, getSelectedTextContexts } from "@/aiParams";
 import { NoteSelectedTextContext, SelectedTextContext } from "@/types/message";
@@ -34,12 +36,7 @@ import { ChatManager } from "@/core/ChatManager";
 import { MessageRepository } from "@/core/MessageRepository";
 import { logError, logInfo, logWarn } from "@/logger";
 import { logFileManager } from "@/logFileManager";
-import {
-  createModelManagement,
-  plusSyncNeeded,
-  syncCopilotPlusProvider,
-  type ModelManagementApi,
-} from "@/modelManagement";
+import { createModelManagement, type ModelManagementApi } from "@/modelManagement";
 import { KeychainService } from "@/services/keychainService";
 import { backupLegacyCredentials } from "@/services/legacyCredentialBackup";
 import {
@@ -50,11 +47,6 @@ import {
 } from "@/services/settingsPersistence";
 import { UserMemoryManager } from "@/memory/UserMemoryManager";
 import { clearRecordedPromptPayload } from "@/LLMProviders/chainRunner/utils/promptPayloadRecorder";
-import {
-  checkIsPaidUser,
-  ENTITLEMENT_REFRESH_INTERVAL_MS,
-  verifyCachedEntitlement,
-} from "@/plusUtils";
 import {
   getWebViewerService,
   startActiveWebTabTracking,
@@ -82,6 +74,9 @@ import { isDesktopRuntime } from "@/utils/desktopRuntime";
 import { disposeNotificationSound } from "@/utils/notificationSound";
 import { installRendererEventsShim } from "@/utils/rendererEventsShim";
 import { ContextProcessor } from "@/contextProcessor";
+import { createObsidianPdfJsParserFactory } from "@/context/documents/obsidianPdfJsHost";
+import { describeNoteImages } from "@/commands/describeImageCommands";
+import { createImageAutoIndexQueue } from "@/context/assets/imageAutoIndexQueue";
 import { CustomCommandManager } from "@/commands/customCommandManager";
 import { ChatManagerChatUIState } from "@/state/ChatUIState";
 import { VaultDataManager } from "@/state/vaultDataAtoms";
@@ -128,7 +123,6 @@ import {
   trashFile,
 } from "@/utils/vaultAdapterUtils";
 import { v4 as uuidv4 } from "uuid";
-import { OpenArtifactsPublisher } from "@/openArtifacts/OpenArtifactsPublisher";
 import { migrateOpenArtifactsFolder } from "@/openArtifacts/openArtifactsLedger";
 import {
   createSelfHostWebSearchAgentBridge,
@@ -138,9 +132,14 @@ import {
 // Removed unused FileTrackingState interface
 
 export default class CopilotPlugin extends Plugin {
+  /** Bounded, opt-in background queue for describing newly added note images. */
+  private imageAutoIndexQueue = createImageAutoIndexQueue({
+    describeNoteImages: (notePath, maxImages) =>
+      describeNoteImages(this, notePath, { quiet: true, maxImagesPerRun: maxImages }),
+    onError: (error, notePath) => logError("Image auto-index failed:", { notePath, error }),
+  });
   // Plugin components
   chainOwner: ChainOwner;
-  brevilabsClient: BrevilabsClient;
   userMessageHistory: string[] = [];
   fileParserManager: FileParserManager;
   customCommandRegister: CustomCommandRegister;
@@ -201,41 +200,17 @@ export default class CopilotPlugin extends Plugin {
     this.modelManagement = createModelManagement({
       app: this.app,
     });
-    // Register/unregister the Copilot Plus provider (and its models) to match
-    // Plus state, so Plus models surface in the chat + opencode pickers. The
-    // license key is already hydrated from Keychain by the settings boundary.
-    // Idempotent, so the redundant initial call below + per-change calls are
-    // safe. Serialized through `plusSyncChain` so a fast
-    // sign-out→sign-in (each its own settings change) settles in issue order,
-    // not in whichever overlapping reconcile happens to finish last.
-    let plusSyncChain: Promise<void> = Promise.resolve();
-    const syncPlus = (isPaidUser: boolean | undefined, licenseKey: string): void => {
-      plusSyncChain = plusSyncChain.then(() =>
-        syncCopilotPlusProvider(this.modelManagement, !!isPaidUser, licenseKey)
-      );
-    };
-    // Initial reconcile: an already-signed-in user's `isPaidUser` is restored
-    // from disk without firing the subscription, so register on load.
-    syncPlus(getSettings().isPaidUser, getSettings().plusLicenseKey);
     this.settingsUnsubscriber = subscribeToSettingsChange((prev, next) => {
-      void (async () => {
-        try {
-          await persistSettings(next, (data) => this.saveData(data), prev);
-        } catch (error) {
-          // Reason: Do NOT rollback memory state on persist failure.
-          // The writeQueue serializes I/O, so a later setSettings() may already
-          // be queued. Rolling back memory would create a split where memory is S0
-          // but disk ends up at S2 when the later write succeeds.
-          // Instead, just notify the user — the in-memory state remains current,
-          // and the next successful persist will reconcile disk with memory.
-          logError("Failed to persist settings.", error);
-          new Notice("Copilot failed to save settings. Check logs and try again.");
-        }
-        // Sign-in / sign-out (isPaidUser flip) or key rotation while signed in.
-        if (plusSyncNeeded(prev, next)) {
-          syncPlus(next.isPaidUser, next.plusLicenseKey);
-        }
-      })();
+      void persistSettings(next, (data) => this.saveData(data), prev).catch((error) => {
+        // Reason: Do NOT rollback memory state on persist failure.
+        // The writeQueue serializes I/O, so a later setSettings() may already
+        // be queued. Rolling back memory would create a split where memory is S0
+        // but disk ends up at S2 when the later write succeeds.
+        // Instead, just notify the user — the in-memory state remains current,
+        // and the next successful persist will reconcile disk with memory.
+        logError("Failed to persist settings.", error);
+        new Notice("Copilot failed to save settings. Check logs and try again.");
+      });
     });
     // One-time settings migrations. Runs after the persist subscriber is wired
     // (so every mutation is saved) and after createModelManagement, and before
@@ -273,28 +248,6 @@ export default class CopilotPlugin extends Plugin {
     ContextProcessor.getInstance(this.app);
     CustomCommandManager.getInstance(this.app);
     logFileManager.setApp(this.app);
-
-    // Initialize BrevilabsClient
-    this.brevilabsClient = BrevilabsClient.getInstance();
-    this.brevilabsClient.setPluginVersion(this.manifest.version);
-    // Re-verify the cached entitlement token offline so the strict Plus and
-    // self-host gates fail closed against an edited data.json until the
-    // signature re-proves itself. The network re-validation below overrides
-    // with the server's token.
-    void verifyCachedEntitlement();
-    if (!isLegacyUpgrade) void checkIsPaidUser(this.app, { trigger: "startup" });
-    // Entitlement tokens expire (~14 days), and the gates honor that expiry even
-    // mid-session. Without a refresh, an Obsidian window left open past `exp`
-    // loses self-host — which silently reroutes web search and document parsing
-    // through the cloud — despite the user being online and still entitled.
-    // Each /license call mints a fresh token, so re-validating daily keeps an
-    // online session current; offline users still lapse at `exp`, as intended.
-    this.registerInterval(
-      window.setInterval(
-        () => void checkIsPaidUser(this.app, { trigger: "refresh" }),
-        ENTITLEMENT_REFRESH_INTERVAL_MS
-      )
-    );
 
     // Initialize the owner of the shared Quick Chat chain
     this.chainOwner = ChainOwner.getInstance(this.app, this.modelManagement);
@@ -354,8 +307,12 @@ export default class CopilotPlugin extends Plugin {
     const vaultDataManager = VaultDataManager.getInstance();
     vaultDataManager.initialize(this.app);
 
-    // Initialize FileParserManager early with other core services
-    this.fileParserManager = new FileParserManager(this.brevilabsClient, this.app.vault);
+    // Initialize FileParserManager early with other core services. The document
+    // parser still owns its relay client internally (see `FileParserManager`);
+    // the plugin no longer manages that client's lifecycle or version stamp.
+    this.fileParserManager = new FileParserManager(undefined, this.app.vault, {
+      localPdfParserFactory: createObsidianPdfJsParserFactory(this),
+    });
 
     // Initialize ChatUIState with new architecture
     const messageRepo = new MessageRepository();
@@ -431,20 +388,34 @@ export default class CopilotPlugin extends Plugin {
     } catch (error) {
       logError("Failed to move the Symposium publishing folder to .openartifacts.", error);
     }
-    const openArtifactsPublisher = new OpenArtifactsPublisher(this.app);
-    const publishFile = (file: TFile): void => {
-      void openArtifactsPublisher
-        .open(file)
-        .catch((error) => logError("Failed to open OpenArtifacts publishing.", error));
-    };
-    this.register(() => openArtifactsPublisher.dispose());
-    registerCommands(this, publishFile);
-
-    // Tool initialization is now handled automatically in CopilotPlusChainRunner and AutonomousAgentChainRunner
+    // The relay publisher was removed with the hosted publish path. The
+    // PUBLISH command registration lives in `registerCommands` (lead-owned);
+    // until it is cleaned up there, the command is a no-op instead of a
+    // dangling import.
+    registerCommands(this);
 
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu: Menu) => {
         registerContextMenu(menu, this.app);
+      })
+    );
+
+    // Opt-in image auto-index: enqueue Markdown notes as they are created or
+    // modified; the bounded queue debounces, dedupes, and caps each run. The
+    // gate is re-read per event so the settings toggle applies live.
+    const autoIndexImageFile = (file: TFile | null): void => {
+      if (!getSettings().enableImageAutoIndex) return;
+      if (!file || file.extension.toLowerCase() !== "md") return;
+      this.imageAutoIndexQueue.enqueueNote(file.path);
+    };
+    this.registerEvent(
+      this.app.vault.on("create", (file) => {
+        autoIndexImageFile(file instanceof TFile ? file : null);
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        autoIndexImageFile(file instanceof TFile ? file : null);
       })
     );
 
@@ -506,9 +477,6 @@ export default class CopilotPlugin extends Plugin {
 
   /** Run all layout-dependent migration work before presenting one summary. */
   private async runStartupMigrations(isLegacyUpgrade: boolean): Promise<void> {
-    const initialSettings = getSettings();
-    const needsLicenseReentry =
-      isLegacyUpgrade && initialSettings.isPaidUser === true && !initialSettings.plusLicenseKey;
     const task = (
       result: Promise<StartupMigrationItem | null>,
       failure: StartupMigrationItem,
@@ -558,23 +526,11 @@ export default class CopilotPlugin extends Plugin {
       status: "error",
       summary: "Folder destinations could not be prepared. Reload Obsidian to retry.",
     });
-    const license: StartupMigrationItem | null = needsLicenseReentry
-      ? {
-          id: "copilot-license",
-          title: "Copilot license",
-          status: "action-required",
-          summary: "Copilot could not restore the previous paid status after the upgrade.",
-          details: ["Re-enter the license key in Copilot Settings to restore paid features."],
-        }
-      : null;
-    if (isLegacyUpgrade) {
-      void checkIsPaidUser(needsLicenseReentry ? undefined : this.app, { trigger: "startup" });
-    }
 
     await runStartupMigrationSummary({
       initialItems: this.startupMigrationItems,
       tasks: [projectTask, commandsTask, promptsTask, relocationTask],
-      afterTasks: () => [license],
+      afterTasks: () => [],
       present: (items) => {
         new ConfirmModal(
           this.app,
@@ -622,6 +578,8 @@ export default class CopilotPlugin extends Plugin {
   }
 
   onunload(): void {
+    // Stop the bounded auto-index queue; in-flight describe runs finish.
+    this.imageAutoIndexQueue?.stop();
     // A settings tree can briefly outlive this plugin instance. Revoke its
     // mutation rights synchronously so an in-flight registration cannot write
     // into the next lifecycle after its asynchronous setup finishes.

@@ -16,12 +16,6 @@ describe("model-display-utils", () => {
   describe("getProviderLabel()", () => {
     it("returns known labels, believer suffixes, and unknown provider ids", () => {
       expect(getProviderLabel("openai")).toBe("OpenAI");
-      expect(
-        getProviderLabel(
-          "copilot-plus",
-          model({ provider: "copilot-plus", believerExclusive: true })
-        )
-      ).toBe("Copilot(Believer)");
       expect(getProviderLabel("custom-provider")).toBe("custom-provider");
     });
   });

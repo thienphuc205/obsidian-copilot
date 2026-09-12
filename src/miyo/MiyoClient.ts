@@ -1,7 +1,7 @@
 import { logError, logInfo, logWarn } from "@/logger";
 import type { MiyoHealthResponse } from "@/miyo/miyoHealth";
 import { MiyoServiceDiscovery } from "@/miyo/MiyoServiceDiscovery";
-import { type CopilotSettings, getSettings } from "@/settings/model";
+import { getSettings } from "@/settings/model";
 import { err2String, withTimeout } from "@/utils";
 import { requestUrl } from "obsidian";
 
@@ -233,21 +233,10 @@ export class MiyoClient {
   private static readonly HEALTH_TIMEOUT_MS = 8000;
 
   private discovery: MiyoServiceDiscovery;
-
-  private readonly authSnapshot?: Pick<CopilotSettings, "plusLicenseKey">;
-
   /**
    * Create a new Miyo client instance.
-   *
-   * @param authSnapshot - Credentials captured when the caller's work began.
-   *   Callers whose requests can outlive the settings they started under —
-   *   a multi-request mutation that straddles a vault switch — pass their own
-   *   snapshot so every request carries the credential of the vault that asked
-   *   for it. Omitted, each request reads the live settings, which is what
-   *   short-lived callers want.
    */
-  constructor(authSnapshot?: Pick<CopilotSettings, "plusLicenseKey">) {
-    this.authSnapshot = authSnapshot;
+  constructor() {
     this.discovery = MiyoServiceDiscovery.getInstance();
   }
 
@@ -353,7 +342,7 @@ export class MiyoClient {
     try {
       const baseUrl = await this.resolveBaseUrl(overrideUrl);
       const url = new URL("/v0/folder", baseUrl);
-      const headers = await this.buildHeaders();
+      const headers = buildHeaders();
       const body = JSON.stringify(request);
       // Last point at which this registration can still be called off: once
       // `requestUrl` has it, Obsidian offers no way to abort.
@@ -430,7 +419,7 @@ export class MiyoClient {
       const response = await requestUrl({
         url: url.toString(),
         method: "GET",
-        headers: await this.buildHeaders(),
+        headers: buildHeaders(),
         throw: false,
       });
       if (response.status === 200) {
@@ -621,24 +610,6 @@ export class MiyoClient {
   }
 
   /**
-   * Build request headers, including auth when configured.
-   * `Authorization` uses the Copilot Plus license key.
-   *
-   * @returns Headers object for requestUrl.
-   */
-  private async buildHeaders(): Promise<Record<string, string>> {
-    const settings = this.authSnapshot ?? getSettings();
-    const headers: Record<string, string> = {};
-
-    const licenseKey = settings.plusLicenseKey;
-    if (licenseKey) {
-      headers.Authorization = `Bearer ${licenseKey}`;
-    }
-
-    return headers;
-  }
-
-  /**
    * Execute a JSON request to the Miyo API.
    *
    * @param baseUrl - Base URL for Miyo.
@@ -665,7 +636,7 @@ export class MiyoClient {
     }
 
     const body = options.body ? JSON.stringify(options.body) : undefined;
-    const headers = await this.buildHeaders();
+    const headers = buildHeaders();
     logInfo("Miyo request:", {
       method: options.method,
       url: url.toString(),
@@ -732,4 +703,9 @@ export class MiyoClient {
     }
     return {} as T;
   }
+}
+
+/** Miyo is a local, license-free service: no Authorization header is sent. */
+function buildHeaders(): Record<string, string> {
+  return {};
 }

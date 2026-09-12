@@ -2,6 +2,18 @@ import type { BackendId } from "@/agentMode/session/types";
 import type { PlanUsageReading } from "@/agentMode/session/planUsage";
 
 /**
+ * Neutral HTTP MCP descriptor supplied by an ACP backend. The SDK-specific
+ * McpServer conversion belongs in AcpBackendProcess, so backend adapters
+ * never import ACP SDK types.
+ */
+export interface AcpMcpHttpServer {
+  type: "http";
+  name: string;
+  url: string;
+  headers: Array<{ name: string; value: string }>;
+}
+
+/**
  * Spawn descriptor for an ACP-speaking agent backend. Backends produce these
  * lazily because they may need to read settings (BYOK keys, backend config) at
  * spawn time.
@@ -10,6 +22,10 @@ export interface AcpSpawnDescriptor {
   command: string;
   args: string[];
   env: NodeJS.ProcessEnv;
+  /** Session-scoped native MCP servers, mapped to SDK values inside acp/. */
+  mcpServers?: AcpMcpHttpServer[];
+  /** Idempotent cleanup for host resources created for this spawn. */
+  dispose?: () => Promise<void>;
 }
 
 /**
@@ -42,9 +58,9 @@ export interface AcpBackend {
    * Whether the account's plan caps meter a session currently on this model. Optional:
    * omitting it means they always do (a Claude or Codex login meters every model that
    * agent serves). A backend that routes to more than one billing source — opencode
-   * serves Copilot Plus models next to BYOK ones — answers per model, so a session on
-   * the user's own key shows no cap meters. Pure and synchronous: it is consulted every
-   * time a cap snapshot is dispatched or the session's model changes.
+   * serves hosted models next to the user's own-keyed ones — answers per model, so a
+   * session on the user's own key shows no cap meters. Pure and synchronous: it is
+   * consulted every time a cap snapshot is dispatched or the session's model changes.
    *
    * @param wireModelId - Model id as it travels to the agent, provider prefix included.
    *   Null when the session's model is not known yet, which must read as "not metered".

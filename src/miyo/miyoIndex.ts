@@ -10,7 +10,7 @@ const listeners = new Set<Listener>();
 /** Request a normal Miyo scan for the current vault. */
 export async function requestMiyoIndexRefresh(app: App): Promise<void> {
   const settings = getSettings();
-  const client = new MiyoClient({ plusLicenseKey: settings.plusLicenseKey });
+  const client = new MiyoClient();
   const baseUrl = await client.resolveBaseUrl(getMiyoCustomUrl(settings));
   await client.scanFolder(baseUrl, getMiyoFolderName(app), false);
 

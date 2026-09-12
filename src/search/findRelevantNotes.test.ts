@@ -443,45 +443,6 @@ describe("findRelevantNotes", () => {
       }
     );
 
-    it("keeps the original authorization identity for related search and its file-status probe after live settings change (https://github.com/Brevilabs/obsidian-copilot-private/issues/280)", async () => {
-      const requestAuthorizationIdentities: Array<string | undefined> = [];
-      mockedGetSettings.mockReturnValue({
-        enableMiyo: true,
-        miyoServerUrl: "https://old-miyo.example",
-        plusLicenseKey: "old-license",
-        debug: false,
-      } as CopilotSettings);
-      mockedMiyoClient.mockImplementation((authSnapshot) => {
-        const clientAuthSnapshot = authSnapshot as { plusLicenseKey?: string };
-        return {
-          resolveBaseUrl: mockResolveBaseUrl,
-          searchRelated: async (...args: unknown[]) => {
-            requestAuthorizationIdentities.push(clientAuthSnapshot.plusLicenseKey);
-            mockedGetSettings.mockReturnValue({
-              enableMiyo: true,
-              miyoServerUrl: "https://new-miyo.example",
-              plusLicenseKey: "new-license",
-              debug: false,
-            } as CopilotSettings);
-            return mockSearchRelated(...args) as unknown;
-          },
-          fileStatus: (...args: unknown[]) => {
-            requestAuthorizationIdentities.push(clientAuthSnapshot.plusLicenseKey);
-            return mockFileStatus(...args) as unknown;
-          },
-        };
-      });
-      mockSearchRelated.mockRejectedValue(new MiyoRequestError(404, ""));
-      mockFileStatus.mockResolvedValue({ status: "pending" });
-
-      const result = await findRelevantNotes({ app: window.app, filePath: "source.md" });
-
-      expect(result.status).toBe("indexing");
-      expect(mockedMiyoClient).toHaveBeenCalledWith({ plusLicenseKey: "old-license" });
-      expect(requestAuthorizationIdentities).toEqual(["old-license", "old-license"]);
-      expect(mockedGetSettings).toHaveBeenCalledTimes(1);
-    });
-
     it("retries related search when indexing completes after the first 404 (https://github.com/logancyang/obsidian-copilot/pull/3088#discussion_r3921456717)", async () => {
       mockSearchRelated
         .mockRejectedValueOnce(new MiyoRequestError(404, "No indexed chunks found for file_path"))

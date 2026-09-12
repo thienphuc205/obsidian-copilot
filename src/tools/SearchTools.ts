@@ -1,9 +1,9 @@
 import { getStandaloneQuestion } from "@/chainUtils";
 import { TEXT_WEIGHT } from "@/constants";
-import { BrevilabsClient } from "@/LLMProviders/brevilabsClient";
 import { hasSelfHostSearchKey, selfHostWebSearch } from "@/LLMProviders/selfHostServices";
-import { logError, logInfo } from "@/logger";
-import { isSelfHostModeValid } from "@/plusUtils";
+import { logError, logInfo, logWarn } from "@/logger";
+import { ImageDescriptionRetriever } from "@/search/v3/ImageDescriptionRetriever";
+import { isSelfHostModeEnabled } from "@/LLMProviders/selfHostMode";
 import { RetrieverFactory } from "@/search/RetrieverFactory";
 import { getSettings } from "@/settings/model";
 import { App } from "obsidian";
@@ -13,6 +13,7 @@ import { createLangChainTool } from "./createLangChainTool";
 import { getWebSearchCitationInstructions } from "@/LLMProviders/chainRunner/utils/citationUtils";
 import { TieredLexicalRetriever } from "@/search/v3/TieredLexicalRetriever";
 import { FilterRetriever } from "@/search/v3/FilterRetriever";
+
 import { RETURN_ALL_LIMIT } from "@/search/v3/SearchCore";
 import { mergeFilterAndSearchResults } from "@/search/v3/mergeResults";
 import type { Document } from "@langchain/core/documents";
@@ -216,6 +217,18 @@ async function performLexicalSearch({
         };
       }
     }
+
+    // Image descriptions join the search results so a query can surface an
+    // image by its description; each image doc carries its vault path so the
+    // citation opens the file. The retriever is fail-closed, but this outer
+    // guard keeps an unexpected failure from breaking note search entirely.
+  }
+
+  try {
+    const imageDocs = await new ImageDescriptionRetriever(app).getRelevantDocuments(query);
+    searchDocs = [...searchDocs, ...imageDocs];
+  } catch (error) {
+    logWarn("image description search failed; notes only", error);
   }
 
   // --- Step 3: Merge filter + search results ---
@@ -450,29 +463,25 @@ const webSearchTool = createLangChainTool({
   schema: webSearchSchema,
   func: async ({ query, chatHistory }) => {
     try {
+      // Web search is self-host-only in this fork: without a configured provider
+      // key there is no search backend to call, so fail with an actionable error
+      // document instead of silently returning nothing.
+      if (!isSelfHostModeEnabled() || !hasSelfHostSearchKey()) {
+        return { error: "Web search requires a self-host web search provider key in settings" };
+      }
+
       // Get standalone question considering chat history
       const standaloneQuestion = await getStandaloneQuestion(query, chatHistory);
 
-      let webContent: string;
-      let citations: string[];
-
-      if (isSelfHostModeValid() && hasSelfHostSearchKey()) {
-        const result = await selfHostWebSearch(standaloneQuestion);
-        webContent = result.content;
-        citations = result.citations;
-      } else {
-        const response = await BrevilabsClient.getInstance().webSearch(standaloneQuestion);
-        webContent = response.response.choices[0].message.content;
-        citations = response.response.citations || [];
-      }
+      const result = await selfHostWebSearch(standaloneQuestion);
 
       // Return structured JSON response for consistency with other tools
       // Format as an array of results like localSearch does
       const formattedResults = [
         {
           type: "web_search",
-          content: webContent,
-          citations: citations,
+          content: result.content,
+          citations: result.citations,
           // Instruct the model to use footnote-style citations and definitions.
           // Chat UI will render [^n] as [n] for readability and show a simple numbered Sources list.
           // When inserted into a note, the original [^n] footnotes will remain valid Markdown footnotes.

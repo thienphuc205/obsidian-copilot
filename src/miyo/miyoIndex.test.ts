@@ -4,7 +4,6 @@ import {
   onMiyoIndexChanged,
   requestMiyoIndexRefresh,
 } from "@/miyo/miyoIndex";
-import { getSettings } from "@/settings/model";
 
 const resolveBaseUrl = jest.fn();
 const scanFolder = jest.fn();
@@ -25,7 +24,6 @@ jest.mock("@/miyo/miyoUtils", () => ({
 describe("miyoIndex", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    (getSettings as jest.Mock).mockReturnValue({ plusLicenseKey: "license" });
     resolveBaseUrl.mockResolvedValue("http://resolved.test");
     scanFolder.mockResolvedValue(undefined);
   });
@@ -37,7 +35,7 @@ describe("miyoIndex", () => {
 
       await requestMiyoIndexRefresh({} as never);
 
-      expect(MiyoClient).toHaveBeenCalledWith({ plusLicenseKey: "license" });
+      expect(MiyoClient).toHaveBeenCalledWith();
       expect(resolveBaseUrl).toHaveBeenCalledWith("http://miyo.test");
       expect(scanFolder).toHaveBeenCalledWith("http://resolved.test", "Test vault", false);
       expect(listener).toHaveBeenCalledTimes(1);

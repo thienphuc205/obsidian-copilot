@@ -52,7 +52,6 @@ export interface LegacyCommandSettings {
 
 export interface CopilotSettings {
   userId: string;
-  plusLicenseKey: string;
   openAIApiKey: string;
   openAIOrgId: string;
   huggingfaceApiKey: string;
@@ -103,6 +102,10 @@ export interface CopilotSettings {
   defaultConversationTag: string;
   autosaveChat: boolean;
   autoAddActiveContentToContext: boolean;
+  /** Restrict explicit @file/@folder context reads to the current vault inventory. */
+  strictContextScope: boolean;
+  /** Agent filesystem sandbox: "off" or "selected-context" (scope to the selection). */
+  agentScopeMode: "off" | "selected-context";
   customPromptsFolder: string;
   chatNoteContextPath: string;
   chatNoteContextTags: string[];
@@ -121,24 +124,29 @@ export interface CopilotSettings {
   defaultOpenArea: DEFAULT_OPEN_AREA;
   defaultSendShortcut: SEND_SHORTCUT;
   defaultConversationNoteName: string;
-  // Any valid paid license (Lite and above). undefined means never checked.
-  isPaidUser: boolean | undefined;
-  // Tier >= Plus (Plus, Pro, Believer, Supporter; excludes Lite). Current
-  // validations derive it from a verified signed entitlement; undefined means
-  // never checked. See plusUtils + entitlement/.
-  isPlusUser: boolean | undefined;
-  // Raw server-signed entitlement token (JWS). Tamper-evident, so safe to persist
-  // and trust offline until its `exp`. Empty when no verified token is stored.
-  entitlementToken: string;
-  // Epoch ms when the entitlement token expires (0 = no verified entitlement).
-  // The reactive tier UI reads this; strict gates use the in-memory verified
-  // claims. Derived from the token's `exp`.
-  entitlementExpiresAt: number;
   inlineEditCommands: LegacyCommandSettings[] | undefined;
   projectList: Array<ProjectConfig>;
   passMarkdownImages: boolean;
   enableAutonomousAgent: boolean;
   enableCustomPromptTemplating: boolean;
+  /** Opt in to the independent Agent web-tool integration. */
+  enableAgentWebTools: boolean;
+  /** Opt in to auto-describing newly embedded images for multimodal search. */
+  enableImageAutoIndex: boolean;
+  /** Provider selected for independent Agent web tools. */
+  agentWebSearchProvider: AgentWebSearchProvider;
+  /**
+   * Firecrawl credential for independent Agent web tools. It is stored through
+   * the existing keychain heuristic rather than passed to any agent process.
+   */
+  firecrawlAgentWebApiKey: string;
+  /** Independent Tavily credential; stored through existing keychain handling. */
+  tavilyAgentWebApiKey: string;
+  /** Independent Exa credential. */
+  exaAgentWebApiKey: string;
+  /** Credential for the explicitly configured normalized web API. */
+  customAgentWebApiKey: string;
+  customAgentWebBaseUrl: string;
   /** Enable self-host mode (e.g., Miyo) - uses self-hosted services for search, LLMs, OCR, etc. */
   enableSelfHostMode: boolean;
   /** Enable Miyo-backed indexing and semantic search when self-host mode is active */
@@ -176,7 +184,8 @@ export interface CopilotSettings {
    * Document-processor backend (settings v6). Seeded from `enableSelfHostMode &&
    * enableMiyo`; read at the parse boundary via `resolveDocProcessorBackend()`.
    */
-  docProcessorBackend: "plus" | "miyo";
+  /** Legacy values ("plus") coerce to the local default during sanitize. */
+  docProcessorBackend: "miyo";
   /** Enable lexical boosts (folder and graph) in search - default: true */
   enableLexicalBoosts: boolean;
   /**
@@ -438,6 +447,8 @@ export interface DeviceAgentProfile {
   };
 }
 
+export type AgentWebSearchProvider = import("@/web/types").WebProviderId;
+
 export const settingsStore = createStore();
 export const settingsAtom = atom<CopilotSettings>(DEFAULT_SETTINGS);
 
@@ -606,18 +617,6 @@ const MODEL_CREDENTIAL_BUNDLE_FIELDS = [
 ] as const satisfies readonly (keyof CustomModel)[];
 
 /**
- * A session proof rather than a credential, despite matching the secret-key
- * heuristic. `verifyEntitlement` checks it against `settings.userId`, which
- * reset replaces with a fresh `uuidv4()`, so a carried-over token could never
- * verify again — it would only survive as dead state that keeps the
- * in-process entitlement looking live while the Plus provider is unregistered.
- * `plusLicenseKey` is the real credential and is preserved; the next license
- * check re-issues this token.
- * https://github.com/logancyang/obsidian-copilot-preview/issues/259
- */
-const SESSION_PROOF_FIELD = "entitlementToken";
-
-/**
  * Non-secret top-level fields a preserved credential needs in order to reach
  * its service: the vendor config a model row falls back to when it does not
  * carry its own.
@@ -638,7 +637,7 @@ const TOP_LEVEL_CREDENTIAL_COMPANION_FIELDS = [
  * exists only per row, and the secret half is derived from a different source.
  */
 const TOP_LEVEL_CREDENTIAL_BUNDLE_FIELDS: readonly string[] = [
-  ...TOP_LEVEL_SECRET_FIELDS.filter((field) => field !== SESSION_PROOF_FIELD),
+  ...TOP_LEVEL_SECRET_FIELDS,
   ...TOP_LEVEL_CREDENTIAL_COMPANION_FIELDS,
 ];
 
@@ -828,21 +827,6 @@ export function resetSettings(): void {
   const defaultSettingsWithBuiltIns = {
     ...DEFAULT_SETTINGS,
     ...preservedTopLevelSecrets,
-    // Reason: reset is not a sign-out event. Flipping `isPaidUser` to the
-    // default `false` reads as sign-out to the settings subscriber, whose
-    // Plus reconcile tears down the preserved Plus provider, its models, and
-    // its keychain entry (`plusSyncNeeded` → `unregisterPlusProvider`). Keep
-    // the last server-confirmed paid state AND its original expiry bound until
-    // the preserved license is revalidated — the expiry is tighten-only data
-    // (`isEntitlementExpired`), so keeping it can only close the license UI
-    // earlier, never hold it open; zeroing it would leave a tokenless
-    // paid-Active display with no time bound while offline. The strict
-    // `isPlusUser` flag is NOT kept: reset drops the signed entitlement
-    // token, and the strict gate must never trust a bare boolean without
-    // that proof — the next validation re-derives it.
-    // https://github.com/logancyang/obsidian-copilot-preview/issues/259
-    isPaidUser: current.isPaidUser,
-    entitlementExpiresAt: current.entitlementExpiresAt,
     activeModels: preserveModelCredentials(
       BUILTIN_CHAT_MODELS.map((model) => ({ ...model, enabled: true })),
       current.activeModels ?? []
@@ -898,7 +882,9 @@ export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
     settingsToSanitize.userId = uuidv4();
   }
 
-  const sanitizedSettings: CopilotSettings = { ...settingsToSanitize };
+  const sanitizedSettings: CopilotSettings = {
+    ...settingsToSanitize,
+  };
   const sanitizedSettingsRecord = sanitizedSettings as unknown as Record<string, unknown>;
   delete sanitizedSettingsRecord.miyoRemoteVaultPath;
   delete sanitizedSettingsRecord.miyoVaultName;
@@ -933,19 +919,6 @@ export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
     sanitizedSettings.enableMiyo = legacyEnableMiyoSearch as boolean;
   }
 
-  // Migration: the old `isPlusUser` ("any valid license") was split into
-  // `isPaidUser` (any paid, incl. Lite) + a new `isPlusUser` (tier >= Plus, used
-  // by the multi-agent gate). Backfill `isPaidUser` from the legacy value. The
-  // legacy value is also a correct seed for the new strict `isPlusUser` because
-  // no sub-Plus paid tier existed before this split, so the carried-over
-  // `isPlusUser` stays correct until the next license validation.
-  if (
-    typeof sanitizedSettings.isPaidUser !== "boolean" &&
-    typeof rawSettings.isPlusUser === "boolean"
-  ) {
-    sanitizedSettings.isPaidUser = rawSettings.isPlusUser;
-  }
-
   // Stuff in settings are string even when the interface has number type!
   const contextTurns = Number(settingsToSanitize.contextTurns);
   sanitizedSettings.contextTurns = isNaN(contextTurns)
@@ -974,9 +947,49 @@ export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
     }
   }
 
+  // Strict context is opt-in so existing chats retain their upstream matching
+  // behavior. Invalid/missing values must never enable a new read boundary by
+  // accident when loading an older or hand-edited data.json.
+  if (typeof sanitizedSettings.strictContextScope !== "boolean") {
+    sanitizedSettings.strictContextScope = DEFAULT_SETTINGS.strictContextScope;
+  }
+  if (sanitizedSettings.agentScopeMode !== "selected-context") {
+    sanitizedSettings.agentScopeMode = DEFAULT_SETTINGS.agentScopeMode;
+  }
+  if (typeof sanitizedSettings.enableImageAutoIndex !== "boolean") {
+    sanitizedSettings.enableImageAutoIndex = DEFAULT_SETTINGS.enableImageAutoIndex;
+  }
+
   // Ensure enableMiyo has a default value
   if (typeof sanitizedSettings.enableMiyo !== "boolean") {
     sanitizedSettings.enableMiyo = DEFAULT_SETTINGS.enableMiyo;
+  }
+
+  // Ensure independent Agent web-tool settings have safe defaults when loading
+  // a settings file written before this slice existed.
+  if (typeof sanitizedSettings.enableAgentWebTools !== "boolean") {
+    sanitizedSettings.enableAgentWebTools = DEFAULT_SETTINGS.enableAgentWebTools;
+  }
+  if (
+    sanitizedSettings.agentWebSearchProvider !== "firecrawl" &&
+    sanitizedSettings.agentWebSearchProvider !== "tavily" &&
+    sanitizedSettings.agentWebSearchProvider !== "exa" &&
+    sanitizedSettings.agentWebSearchProvider !== "custom"
+  ) {
+    sanitizedSettings.agentWebSearchProvider = DEFAULT_SETTINGS.agentWebSearchProvider;
+  }
+  if (typeof sanitizedSettings.firecrawlAgentWebApiKey !== "string") {
+    sanitizedSettings.firecrawlAgentWebApiKey = DEFAULT_SETTINGS.firecrawlAgentWebApiKey;
+  }
+  if (typeof sanitizedSettings.tavilyAgentWebApiKey !== "string") {
+    sanitizedSettings.tavilyAgentWebApiKey = DEFAULT_SETTINGS.tavilyAgentWebApiKey;
+  }
+  for (const key of [
+    "exaAgentWebApiKey",
+    "customAgentWebApiKey",
+    "customAgentWebBaseUrl",
+  ] as const) {
+    if (typeof sanitizedSettings[key] !== "string") sanitizedSettings[key] = DEFAULT_SETTINGS[key];
   }
 
   // Ensure enableMiyoSearchSkill has a default value
@@ -1007,9 +1020,9 @@ export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
     sanitizedSettings.selfHostSearchProvider = DEFAULT_SETTINGS.selfHostSearchProvider;
   }
 
-  // Ensure docProcessorBackend is a valid value (settings v6)
-  const validDocProcessorBackends = ["plus", "miyo"] as const;
-  if (!validDocProcessorBackends.includes(sanitizedSettings.docProcessorBackend)) {
+  // Ensure docProcessorBackend is a valid value (settings v6). The legacy
+  // "plus" relay backend no longer exists — it coerces to the local default.
+  if (sanitizedSettings.docProcessorBackend !== "miyo") {
     sanitizedSettings.docProcessorBackend = DEFAULT_SETTINGS.docProcessorBackend;
   }
 

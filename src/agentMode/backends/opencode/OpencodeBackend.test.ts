@@ -21,16 +21,15 @@ import {
 import type { UserSystemPrompt } from "@/system-prompts/type";
 import {
   buildOpencodeConfig,
-  effortVariantsFor,
   OPENCODE_PROVIDER_MAP,
   OpencodeBackend,
   type OpencodeModelDeps,
 } from "./OpencodeBackend";
+import { computeAgentScope, setActiveAgentScope } from "@/agentMode/session/agentScope";
 import {
   buildAgentSystemPrompt,
   COPILOT_PROMPT_BASE,
 } from "@/agentMode/backends/shared/agentSystemPrompt";
-import { CopilotPlusUsageReader } from "@/agentMode/backends/shared/copilotPlusUsage";
 import {
   MIYO_SEARCH_FOLDER_ENV,
   MIYO_SEARCH_SCOPE_ENV,
@@ -161,8 +160,6 @@ function okEntry(provider: Provider, model: ConfiguredModel): EnabledBackendEntr
 function makeDeps(args: {
   resolved: EnabledBackendEntry[];
   keys?: Record<string, string | null>;
-  /** Published effort levels keyed by wire id; a missing key answers null. */
-  efforts?: Record<string, readonly string[] | null>;
 }): OpencodeModelDeps {
   const keys = args.keys ?? {};
   return {
@@ -176,30 +173,7 @@ function makeDeps(args: {
       url: "http://127.0.0.1:1234/search",
       token: "session-token",
     }),
-    ...(args.efforts
-      ? { getReasoningEfforts: async (id: string) => args.efforts?.[id] ?? null }
-      : {}),
   };
-}
-
-/** The Copilot Plus provider row `CopilotPlusSetupApi` seeds. */
-function makePlusProvider(): Provider {
-  return makeProvider(
-    "p-plus",
-    { kind: "copilot-plus" },
-    {
-      providerType: "openai-compatible",
-      displayName: "Copilot Plus",
-      baseUrl: "https://models.brevilabs.com/v1",
-    }
-  );
-}
-
-/** A Copilot Plus reasoning model, as `COPILOT_PLUS_MODELS` snapshots it. */
-function makePlusReasoningModel(wireId: string): ConfiguredModel {
-  const model = makeModel("p-plus", wireId);
-  model.info.reasoning = true;
-  return model;
 }
 
 const NO_MODELS_DEPS = makeDeps({ resolved: [] });
@@ -250,7 +224,7 @@ describe("buildOpencodeConfig — provider/model injection", () => {
   });
 
   it("injects a vision model's modalities + attachment so opencode won't strip images", async () => {
-    // Copilot Plus / self-hosted providers have no models.dev catalog entry, so
+    // Non-catalog providers have no models.dev catalog entry, so
     // opencode defaults `input.image` to false and strips images. Carrying the
     // model's own modalities tells opencode it's multimodal.
     const provider = makeProvider("p-anthropic", {
@@ -646,148 +620,32 @@ describe("buildOpencodeConfig — provider/model injection", () => {
     expect(cfg.provider.groq.options).toEqual({ apiKey: "gq-123" });
   });
 
-  it("registers Copilot Plus as a custom openai-compatible provider from its own fields", async () => {
-    // Plus has no catalog identity, so it's registered like a custom endpoint —
-    // npm/name/baseURL all read off the provider row (seeded by CopilotPlusSetupApi).
-    const provider = makeProvider(
-      "p-plus",
-      { kind: "copilot-plus" },
-      {
-        providerType: "openai-compatible",
-        displayName: "Copilot Plus",
-        baseUrl: "https://models.brevilabs.com/v1",
-      }
-    );
+  it("registers a custom openai-compatible provider from its own fields", async () => {
+    // A provider with no catalog identity (Ollama / LM Studio / a proxy) is
+    // registered like a custom endpoint — npm/name/baseURL all read off the
+    // provider row.
+    const provider = makeOpenAICompatibleProvider("p-custom", "http://localhost:11434/v1");
     const deps = makeDeps({
-      resolved: [okEntry(provider, makeModel("p-plus", "copilot-plus-flash"))],
-      keys: { "p-plus": "plus-token-123" },
+      resolved: [okEntry(provider, makeModel("p-custom", "llama3"))],
+      keys: { "p-custom": "local-key" },
     });
-    deps.clientVersion = "4.0.0-preview-260802";
     const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
       provider: Record<
         string,
         {
           npm?: string;
           name?: string;
-          options?: { baseURL?: string; apiKey?: string; headers?: Record<string, string> };
+          options?: { baseURL?: string; apiKey?: string };
           models?: Record<string, unknown>;
         }
       >;
     };
-    const cp = cfg.provider["copilot-plus"];
-    expect(cp.npm).toBe("@ai-sdk/openai-compatible");
-    expect(cp.name).toBe("Copilot Plus");
-    expect(cp.options?.baseURL).toBe("https://models.brevilabs.com/v1");
-    expect(cp.options?.apiKey).toBe("plus-token-123");
-    expect(cp.options?.headers).toEqual({
-      "X-Client-Version": "4.0.0-preview-260802",
-    });
-    expect(cp.models).toEqual({ "copilot-plus-flash": {} });
-  });
-
-  it("declares the effort levels Copilot Plus published, and disables the rest (https://github.com/logancyang/obsidian-copilot/issues/2917)", async () => {
-    // Left to itself opencode infers the menu from the model id — a fixed
-    // low/medium/high plus its own per-model special cases — which offers levels that
-    // are synonyms of one another and misses levels the model has. The disables are
-    // what removes an inferred level, since config variants merge over the guess.
-    const model = makePlusReasoningModel("copilot-plus-flash");
-    const deps = makeDeps({
-      resolved: [okEntry(makePlusProvider(), model)],
-      keys: { "p-plus": "plus-token-123" },
-      efforts: { "copilot-plus-flash": ["high", "max"] },
-    });
-
-    const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
-      provider: Record<string, { models?: Record<string, Record<string, unknown>> }>;
-    };
-
-    expect(cfg.provider["copilot-plus"].models?.["copilot-plus-flash"]).toEqual({
-      reasoning: true,
-      variants: {
-        high: { reasoningEffort: "high" },
-        max: { reasoningEffort: "max" },
-        none: { disabled: true },
-        minimal: { disabled: true },
-        low: { disabled: true },
-        medium: { disabled: true },
-        xhigh: { disabled: true },
-      },
-    });
-  });
-
-  it("offers no effort control for a Copilot Plus model that honors no level (https://github.com/logancyang/obsidian-copilot/issues/2917)", async () => {
-    // opencode builds the menu only for models it is told reason, so withholding the
-    // flag is what makes the control disappear. A menu whose every entry does nothing
-    // is worse than no menu.
-    const deps = makeDeps({
-      resolved: [okEntry(makePlusProvider(), makePlusReasoningModel("honors-no-level"))],
-      keys: { "p-plus": "plus-token-123" },
-      efforts: { "honors-no-level": [] },
-    });
-
-    const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
-      provider: Record<string, { models?: Record<string, Record<string, unknown>> }>;
-    };
-
-    expect(cfg.provider["copilot-plus"].models?.["honors-no-level"]).toEqual({});
-  });
-
-  it("keeps the inferred menu when the published levels cannot be read (https://github.com/logancyang/obsidian-copilot/issues/2917)", async () => {
-    // A service too old to publish them, or one transient outage. Either way an
-    // imperfect menu beats dropping a control that works.
-    const deps = makeDeps({
-      resolved: [okEntry(makePlusProvider(), makePlusReasoningModel("copilot-plus-flash"))],
-      keys: { "p-plus": "plus-token-123" },
-      efforts: { "copilot-plus-flash": null },
-    });
-
-    const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
-      provider: Record<string, { models?: Record<string, Record<string, unknown>> }>;
-    };
-
-    expect(cfg.provider["copilot-plus"].models?.["copilot-plus-flash"]).toEqual({
-      reasoning: true,
-    });
-  });
-
-  it("never declares effort levels for a BYOK model, which has none published", async () => {
-    const provider = makeProvider("p-anthropic", { kind: "byok", catalogProviderId: "anthropic" });
-    const model = makeModel("p-anthropic", "copilot-plus-flash");
-    model.info.reasoning = true;
-    const getReasoningEfforts = jest.fn(async () => ["none", "low"]);
-    const deps = {
-      ...makeDeps({ resolved: [okEntry(provider, model)], keys: { "p-anthropic": "anth-123" } }),
-      getReasoningEfforts,
-    };
-
-    const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
-      provider: Record<string, { models?: Record<string, Record<string, unknown>> }>;
-    };
-
-    expect(cfg.provider.anthropic.models?.["copilot-plus-flash"]).toEqual({ reasoning: true });
-    expect(getReasoningEfforts).not.toHaveBeenCalled();
-  });
-
-  it("skips Copilot Plus when its provisioned relay token is unavailable (https://github.com/logancyang/obsidian-copilot/issues/2895)", async () => {
-    const provider = makeProvider(
-      "p-plus",
-      { kind: "copilot-plus" },
-      {
-        providerType: "openai-compatible",
-        baseUrl: "https://models.brevilabs.com/v1",
-        requiresApiKey: false,
-      }
-    );
-    const deps = makeDeps({
-      resolved: [okEntry(provider, makeModel("p-plus", "copilot-plus-flash"))],
-      keys: { "p-plus": null },
-    });
-
-    const cfg = (await buildOpencodeConfig(getSettings(), deps)) as {
-      provider: Record<string, unknown>;
-    };
-
-    expect(cfg.provider).toEqual({});
+    const custom = cfg.provider["p-custom"];
+    expect(custom.npm).toBe("@ai-sdk/openai-compatible");
+    expect(custom.name).toBe("p-custom");
+    expect(custom.options?.baseURL).toBe("http://localhost:11434/v1");
+    expect(custom.options?.apiKey).toBe("local-key");
+    expect(custom.models).toEqual({ llama3: {} });
   });
 });
 
@@ -1060,6 +918,146 @@ describe("buildOpencodeConfig — context-cache external_directory allow", () =>
   });
 });
 
+describe("buildOpencodeConfig — vault-selection sandbox permissions (copilotScope fallback)", () => {
+  beforeEach(() => {
+    resetSettings();
+    seedSkills([]);
+    resetPromptState();
+    setActiveAgentScope(null);
+  });
+
+  afterEach(() => setActiveAgentScope(null));
+
+  const scopedSelection = () =>
+    computeAgentScope({ contextFolders: ["Research"] }, "/vault", { availableFilePaths: [] });
+
+  type ScopeConfig = {
+    permission?: Record<string, unknown>;
+    agent: Record<string, { permission?: Record<string, unknown> }>;
+  };
+
+  it("ask-gates writes and shell work on the top level and both spawn agents", async () => {
+    const cfg = (await buildOpencodeConfig(
+      getSettings(),
+      NO_MODELS_DEPS,
+      undefined,
+      scopedSelection()
+    )) as ScopeConfig;
+
+    // No path-scoped write rule is emitted (see the pinned-version note in
+    // OpencodeBackend) — only the proven flat ask values.
+    expect(cfg.permission).toEqual({ bash: "ask", edit: "ask" });
+    // The built-in build agent (canonical auto) is where the ask-gating bites:
+    // it was permissive before.
+    expect(cfg.agent.build.permission).toEqual({ bash: "ask", edit: "ask" });
+    expect(cfg.agent["copilot-build"].permission).toEqual({ bash: "ask", edit: "ask" });
+  });
+
+  it("re-applies the cache-root external_directory allow while the scope is active", async () => {
+    const cfg = (await buildOpencodeConfig(
+      getSettings(),
+      NO_MODELS_DEPS,
+      "/cache/root",
+      scopedSelection()
+    )) as ScopeConfig;
+    const allow = { external_directory: { "/cache/root/**": "allow" } };
+    expect(cfg.agent.build.permission).toEqual({ ...allow, bash: "ask", edit: "ask" });
+    expect(cfg.agent["copilot-build"].permission).toEqual({ ...allow, bash: "ask", edit: "ask" });
+  });
+
+  it("preserves Self-Host web denies and skill denies under the scope merge", async () => {
+    setSettings({ enableSelfHostMode: true });
+    seedSkills([makeSkill("foo", ["claude"])]);
+    const cfg = (await buildOpencodeConfig(
+      getSettings(),
+      NO_MODELS_DEPS,
+      undefined,
+      scopedSelection()
+    )) as ScopeConfig;
+
+    expect(cfg.permission).toEqual({
+      websearch: "deny",
+      webfetch: "deny",
+      skill: { foo: "deny" },
+      bash: "ask",
+      edit: "ask",
+    });
+  });
+
+  it("re-applies the scope permissions after a wholesale OPENCODE_CONFIG_CONTENT override", async () => {
+    setActiveAgentScope(scopedSelection());
+    updateSetting("agentMode", {
+      byok: {},
+      activeBackend: "opencode",
+      debugFullFrames: false,
+      notificationSound: false,
+      notificationSoundId: "piano",
+      welcomeDismissed: false,
+      skills: { folder: "copilot/skills" },
+      backends: {
+        opencode: {
+          binaryPath: "/path/to/opencode",
+          envOverrides: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({
+              permission: "allow",
+              agent: { build: { permission: { bash: "allow" } } },
+            }),
+          },
+        },
+      },
+    });
+
+    const desc = await new OpencodeBackend(NO_MODELS_DEPS).buildSpawnDescriptor({
+      vaultBasePath: "/vault/abs",
+    });
+    const cfg = JSON.parse(desc.env.OPENCODE_CONFIG_CONTENT as string) as ScopeConfig;
+
+    // The shorthand "allow" is preserved as the wildcard, and the ask-gated
+    // writes win for bash/edit; other agents gain the asks too.
+    expect(cfg.permission).toEqual({ "*": "allow", bash: "ask", edit: "ask" });
+    expect(cfg.agent.build.permission).toEqual({ bash: "ask", edit: "ask" });
+  });
+
+  it("leaves every permission shape untouched when no scope is active", async () => {
+    const cfg = (await buildOpencodeConfig(getSettings(), NO_MODELS_DEPS)) as ScopeConfig;
+    expect(cfg.permission).toBeUndefined();
+    expect(cfg.agent.build.permission).toBeUndefined();
+    expect(cfg.agent["copilot-build"].permission).toEqual({ bash: "ask", edit: "ask" });
+  });
+
+  it("seals an override that would otherwise drop the cache allow without re-warning", async () => {
+    setActiveAgentScope(scopedSelection());
+    updateSetting("agentMode", {
+      byok: {},
+      activeBackend: "opencode",
+      debugFullFrames: false,
+      notificationSound: false,
+      notificationSoundId: "piano",
+      welcomeDismissed: false,
+      skills: { folder: "copilot/skills" },
+      backends: {
+        opencode: {
+          binaryPath: "/path/to/opencode",
+          envOverrides: { OPENCODE_CONFIG_CONTENT: "{}" },
+        },
+      },
+    });
+    const deps: OpencodeModelDeps = { ...NO_MODELS_DEPS, getCacheRoot: () => "/cache/root" };
+
+    const desc = await new OpencodeBackend(deps).buildSpawnDescriptor({ vaultBasePath: "/vault" });
+    const cfg = JSON.parse(desc.env.OPENCODE_CONFIG_CONTENT as string) as ScopeConfig;
+
+    expect(cfg.permission).toEqual({
+      external_directory: { "/cache/root/**": "allow" },
+      bash: "ask",
+      edit: "ask",
+    });
+    // The override no longer silently drops the allow, so the stale-override
+    // warning must not fire.
+    expect(logWarn).not.toHaveBeenCalled();
+  });
+});
+
 describe("OpencodeBackend.buildSpawnDescriptor", () => {
   beforeEach(() => {
     resetSettings();
@@ -1109,28 +1107,6 @@ describe("OpencodeBackend.buildSpawnDescriptor", () => {
     const cfg = JSON.parse(desc.env.OPENCODE_CONFIG_CONTENT as string);
     expect(cfg.provider.anthropic.options).toEqual({ apiKey: "anth-xyz" });
     expect(cfg.provider.anthropic.models).toEqual({ "claude-sonnet-4-6": {} });
-  });
-
-  it("passes the plugin version to built-in Copilot Plus skills", async () => {
-    setSettings({ isPaidUser: true, plusLicenseKey: "plus-token", userId: "user-1" });
-    updateSetting("agentMode", {
-      byok: {},
-      activeBackend: "opencode",
-      debugFullFrames: false,
-      notificationSound: false,
-      notificationSoundId: "piano",
-      welcomeDismissed: false,
-      skills: { folder: "copilot/skills" },
-      backends: { opencode: { binaryPath: "/path/to/opencode" } },
-    });
-    const backend = new OpencodeBackend({
-      ...NO_MODELS_DEPS,
-      clientVersion: "4.0.0-preview-260802",
-    });
-
-    const desc = await backend.buildSpawnDescriptor({ vaultBasePath: "/vault/abs" });
-
-    expect(desc.env.COPILOT_CLIENT_VERSION).toBe("4.0.0-preview-260802");
   });
 
   it("https://github.com/Brevilabs/obsidian-copilot-private/issues/121 gives global and Project sessions the same protected active-vault Miyo identity", async () => {
@@ -1337,10 +1313,9 @@ describe("OpencodeBackend.buildSpawnDescriptor", () => {
     expect(logWarn).not.toHaveBeenCalled();
   });
 
-  it("skips building the generated config when an override replaces it (https://github.com/logancyang/obsidian-copilot/issues/2917)", async () => {
-    // The override wins wholesale, so building a config would only spend a Copilot Plus
-    // catalog read on JSON that is thrown away — and an unreachable models host makes
-    // that read wait out its deadline before every spawn.
+  it("skips building the generated config when an override replaces it", async () => {
+    // The override wins wholesale, so building a generated config would be
+    // discarded work.
     updateSetting("agentMode", {
       byok: {},
       activeBackend: "opencode",
@@ -1356,15 +1331,14 @@ describe("OpencodeBackend.buildSpawnDescriptor", () => {
         },
       },
     });
-    const readReasoningEfforts = jest.spyOn(
-      CopilotPlusUsageReader.prototype,
-      "readReasoningEfforts"
-    );
     const resolveEnabled = jest.fn(() => [
-      okEntry(makePlusProvider(), makePlusReasoningModel("copilot-plus-flash")),
+      okEntry(
+        makeOpenAICompatibleProvider("p-custom", "http://localhost:11434/v1"),
+        makeModel("p-custom", "llama3")
+      ),
     ]);
     const backend = new OpencodeBackend({
-      ...makeDeps({ resolved: [], keys: { "p-plus": "plus-token-123" } }),
+      ...makeDeps({ resolved: [] }),
       backendConfigRegistry: { resolveEnabled } as unknown as BackendConfigRegistry,
     });
 
@@ -1372,8 +1346,6 @@ describe("OpencodeBackend.buildSpawnDescriptor", () => {
 
     expect(desc.env.OPENCODE_CONFIG_CONTENT).toBe('{"model":"custom"}');
     expect(resolveEnabled).not.toHaveBeenCalled();
-    expect(readReasoningEfforts).not.toHaveBeenCalled();
-    readReasoningEfforts.mockRestore();
   });
 
   it("does not warn about the override when no cacheRoot is resolved", async () => {
@@ -1402,46 +1374,10 @@ describe("OpencodeBackend.buildSpawnDescriptor", () => {
 // unit-tested in `backends/shared/agentSystemPrompt.test.ts`. The opencode tests
 // above only assert that the composed prompt reaches `cfg.agent.<id>.prompt`.
 
-describe("effortVariantsFor()", () => {
-  it("declares each published level and disables every level that was not published", () => {
-    expect(effortVariantsFor(["high", "max"])).toEqual({
-      high: { reasoningEffort: "high" },
-      max: { reasoningEffort: "max" },
-      none: { disabled: true },
-      minimal: { disabled: true },
-      low: { disabled: true },
-      medium: { disabled: true },
-      xhigh: { disabled: true },
-    });
-  });
-
-  it("disables thinking-off, which the service rejects rather than publishes", () => {
-    // An inferred menu that still offered it would invite the user to pick a level that
-    // fails the whole turn. https://github.com/logancyang/obsidian-copilot/issues/2915
-    expect(effortVariantsFor(["high", "max"]).none).toEqual({ disabled: true });
-  });
-
-  it("declares a published level the plugin does not know about", () => {
-    // The published list is the service's to extend; a client that dropped an
-    // unrecognized level would hide a level the model really has until it shipped again.
-    expect(effortVariantsFor(["ultra"])).toMatchObject({
-      ultra: { reasoningEffort: "ultra" },
-      high: { disabled: true },
-    });
-  });
-
-  it("disables every level when nothing was published", () => {
-    expect(Object.values(effortVariantsFor([]))).toEqual(
-      Array.from({ length: 7 }, () => ({ disabled: true }))
-    );
-  });
-});
-
 describe("OPENCODE_PROVIDER_MAP", () => {
-  it("maps the BYOK provider ids plus Copilot Plus to opencode provider ids", () => {
+  it("maps the BYOK provider ids to opencode provider ids", () => {
     expect(OPENCODE_PROVIDER_MAP[ChatModelProviders.ANTHROPIC]).toBe("anthropic");
     expect(OPENCODE_PROVIDER_MAP[ChatModelProviders.OPENAI]).toBe("openai");
     expect(OPENCODE_PROVIDER_MAP[ChatModelProviders.OPENROUTERAI]).toBe("openrouter");
-    expect(OPENCODE_PROVIDER_MAP[ChatModelProviders.COPILOT_PLUS]).toBe("copilot-plus");
   });
 });

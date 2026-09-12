@@ -88,15 +88,6 @@ export type {
   SyncAgentModelsInput,
 } from "./setup/AgentSetupApi";
 
-export { CopilotPlusSetupApi } from "./setup/CopilotPlusSetupApi";
-export type { PlusSetupResult, RegisterPlusProviderInput } from "./setup/CopilotPlusSetupApi";
-export {
-  COPILOT_PLUS_DEFAULT_ENABLED_MODELS,
-  COPILOT_PLUS_MODELS,
-  plusSyncNeeded,
-  syncCopilotPlusProvider,
-} from "./setup/copilotPlusSync";
-
 // ---------------------------------------------------------------------------
 // Top-level factory + coordinator
 // ---------------------------------------------------------------------------
@@ -117,7 +108,6 @@ export {
   backendsAtom,
   byokProvidersAtom,
   configuredModelsAtom,
-  copilotPlusProvidersAtom,
   providersAtom,
   selfHostModeAtom,
   visibleByokProvidersAtom,
@@ -134,3 +124,9 @@ export { ModelManagementProvider, useModelManagement } from "./ui/ModelManagemen
 // ---------------------------------------------------------------------------
 
 export { ByokPanel } from "./ui/tabs/ByokPanel";
+
+// ---------------------------------------------------------------------------
+// Self-hosted-aware LLM timeouts (Ollama / LM Studio / any local runner)
+// ---------------------------------------------------------------------------
+
+export { LOCAL_LLM_TIMEOUT_MS, resolveLocalAwareTimeout } from "./providers/localAwareTimeout";

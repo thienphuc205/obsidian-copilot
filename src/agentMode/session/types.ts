@@ -5,6 +5,11 @@ import type { FormattedDateTime, MessageContext } from "@/types/message";
 // `import type` keeps the cycle with `fanoutTypes` compile-time only.
 import type { FanoutTurn } from "@/agentMode/session/fanout/fanoutTypes";
 import type { PlanUsage } from "@/agentMode/session/planUsage";
+import type { AgentScope } from "./agentScope";
+import type { LocalAttachmentRef } from "./chatAttachmentRefs";
+import type { SourceReference } from "@/context/sourceReferences";
+
+export type { LocalAttachmentRef } from "./chatAttachmentRefs";
 
 export type { PlanUsage, UsageWindow } from "@/agentMode/session/planUsage";
 import type { ProjectScopeId } from "./scope";
@@ -655,6 +660,15 @@ export interface OpenSessionInput {
    */
   projectId?: ProjectScopeId;
   /**
+   * Optional vault-selection sandbox ({@link AgentScope}) captured from the
+   * user's explicit @note/@folder selection when `agentScopeMode` is
+   * `"selected-context"`. Backends that can enforce a writable area use it to
+   * confine writes; absent / null means the vault-wide default — no sandbox.
+   * A session that has already opened cannot be re-scoped, so this carries the
+   * scope known at open time.
+   */
+  scope?: AgentScope;
+  /**
    * Absolute paths to widen the agent's searchable roots beyond `cwd` (the
    * project's materialized context directories). Forwarded on every
    * session-lifecycle request (new / resume / load) — resume and load
@@ -844,6 +858,8 @@ export type AgentMessagePart =
       input?: unknown;
       output?: AgentToolCallOutput[];
       locations?: { path: string; line?: number }[];
+      /** Citation metadata extracted from the plugin-owned BYOK web bridge. */
+      sourceReferences?: SourceReference[];
       /**
        * Vendor tool identity (e.g. "Read", "Edit", "Task", "ExitPlanMode")
        * supplied by the backend adapter. Used by the trail UI to pick a
@@ -890,7 +906,7 @@ export type AgentMessagePart =
  * Display message shape for the Agent Mode UI stack. Distinct from the
  * legacy `ChatMessage` because Agent Mode does not feed messages through a
  * LangChain prompt — the agent owns the model's view of the conversation —
- * so we drop `processedText`, `contextEnvelope`, `sources`, `responseMetadata`.
+ * so we drop `processedText`, `contextEnvelope`, and `responseMetadata`.
  */
 export interface AgentChatMessage {
   id: string;
@@ -902,10 +918,18 @@ export interface AgentChatMessage {
   message: string;
   /** Assistant-only structured parts (tool calls, thoughts, plans). */
   parts?: AgentMessagePart[];
+  /**
+   * Bounded display-only citations restored from a saved chat. Live tool calls
+   * keep their references on `parts`; persistence may aggregate them here so
+   * reloading a transcript does not lose its Source Inspector targets.
+   */
+  sourceReferences?: readonly SourceReference[];
   /** User messages may carry context (notes, urls, etc.). */
   context?: MessageContext;
   /** Images / rich content for user messages. */
   content?: unknown[];
+  /** Optional bounded metadata for device-local attachments; never a permission grant. */
+  localAttachmentRefs?: readonly LocalAttachmentRef[];
   /**
    * Backend `stopReason` once the turn finishes. Absent while streaming,
    * set when `prompt()` resolves. The UI uses cancellation to suppress answer

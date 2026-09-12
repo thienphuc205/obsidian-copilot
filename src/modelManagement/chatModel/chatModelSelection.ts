@@ -25,9 +25,6 @@ function getLegacyChatModelKeys(entry: ResolvedChatBackendEntry): readonly strin
   const providers = new Set<ChatModelProviders>([
     mapProviderTypeToChatModelProvider(entry.provider),
   ]);
-  if (entry.provider.origin.kind === "copilot-plus") {
-    providers.add(ChatModelProviders.COPILOT_PLUS);
-  }
   if (entry.provider.origin.kind === "byok" && entry.provider.origin.catalogProviderId) {
     const catalogProvider = CATALOG_ID_TO_CHAT_PROVIDER[entry.provider.origin.catalogProviderId];
     if (catalogProvider) providers.add(catalogProvider);

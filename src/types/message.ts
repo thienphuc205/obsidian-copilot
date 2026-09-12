@@ -1,4 +1,5 @@
 import { PromptContextEnvelope } from "@/context/PromptContextTypes";
+import type { SourceReference } from "@/context/sourceReferences";
 import { TFile } from "obsidian";
 
 /**
@@ -144,7 +145,7 @@ export interface ChatMessage {
   isVisible: boolean;
 
   /** Sources cited in the response */
-  sources?: { title: string; path: string; score: number; explanation?: unknown }[];
+  sources?: SourceReference[];
 
   /** Rich content (images, etc.) */
   content?: unknown[];
@@ -212,7 +213,7 @@ export interface StoredMessage {
 
   isVisible: boolean;
   isErrorMessage?: boolean;
-  sources?: { title: string; path: string; score: number; explanation?: unknown }[];
+  sources?: SourceReference[];
   content?: unknown[];
   responseMetadata?: ResponseMetadata;
 }

@@ -5,9 +5,6 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { Notice } from "obsidian";
 import React from "react";
 
-// Stub the Plus banner to keep its dependency chain out of the test.
-jest.mock("@/settings/v2/components/PlusSettings", () => ({ PlusSettings: () => null }));
-
 // The Agents section is lazily imported behind a desktop gate; stub the module
 // the lazy import resolves to so the test never pulls in the agentMode barrel.
 jest.mock("@/settings/v2/components/AgentSettings", () => ({
@@ -16,6 +13,14 @@ jest.mock("@/settings/v2/components/AgentSettings", () => ({
 
 const isDesktopRuntime = jest.fn<boolean, []>().mockReturnValue(true);
 jest.mock("@/utils/desktopRuntime", () => ({ isDesktopRuntime: () => isDesktopRuntime() }));
+
+// BasicSettings reads "@/utils" at require time (formatDateTime, ensureFolderExists
+// via the Copilot folder settings); the real module is out of this suite's scope,
+// so stub the two functions the reachable paths need.
+jest.mock("@/utils", () => ({
+  formatDateTime: jest.fn(() => ({ fileName: "stub", formatted: "stub" })),
+  ensureFolderExists: jest.fn(async () => undefined),
+}));
 
 // App is threaded via useApp; the root-change orchestration is unit-tested in
 // copilotRootChange.test, so mock it here to observe the UI's decisions.
@@ -140,6 +145,14 @@ describe("BasicSettings", () => {
   it("binds the Copilot folder input to the persisted root", () => {
     render(<BasicSettings />);
     expect(screen.getByLabelText<HTMLInputElement>("Copilot folder").value).toBe("copilot");
+  });
+
+  it("exposes strict file/folder context as an opt-in setting", () => {
+    render(<BasicSettings />);
+
+    expect(screen.getByText("Strict @file/@folder context")).not.toBeNull();
+    expect(screen.getByText(/does not sandbox ACP shell, MCP/)).not.toBeNull();
+    expect(settingsStore.get(settingsAtom).strictContextScope).toBe(false);
   });
 
   it("no longer renders the retired conversation folder and tag inputs", () => {

@@ -24,6 +24,7 @@ import type {
 import { PERMISSION_OPTION_KINDS } from "@/agentMode/session/types";
 import { resolveToolName } from "@/agentMode/session/toolName";
 import { isVaultWriteToolKind } from "@/agentMode/session/fanout/fanoutTypes";
+import { isAbsolutePath } from "@/utils/vaultPath";
 import { err2String } from "@/utils";
 import { logSdkInbound, logSdkOutbound } from "./sdkDebugTap";
 import { deriveToolKind, deriveToolTitle, vendorMetaFields } from "./toolMeta";
@@ -38,6 +39,29 @@ export type Prompter = (req: PermissionPrompt) => Promise<PermissionDecision>;
 export type AskUserQuestionPrompter = (req: AskUserQuestionPrompt) => Promise<AgentQuestionAnswers>;
 
 type InProcessCanUseTool = (...args: Parameters<CanUseTool>) => Promise<PermissionResult>;
+
+/**
+ * Structural mirror of `AgentScope` (`agentMode/session/agentScope.ts`) so the
+ * SDK layer can gate tool calls without importing the session-layer type,
+ * which is being added by the scope-plumbing workstream. The session manager
+ * hands an `AgentScope` straight through; anything with these members
+ * satisfies this shape.
+ */
+export interface ScopeSandbox {
+  vaultRelativeFiles?: Iterable<string>;
+  vaultRelativeFolders?: ReadonlySet<string>;
+  absoluteFolders?: ReadonlySet<string>;
+  /**
+   * Absolute vault root used to normalize absolute tool paths into
+   * vault-relative ones. Supplied by the backend process (which knows the
+   * vault base) alongside the session's scope; absent only in tests.
+   */
+  vaultRoot?: string;
+}
+
+/** The message sent for any write tool call targeting a path outside the scope. */
+export const SCOPE_SANDBOX_DENY_MESSAGE =
+  "Outside the selected context scope for this session — enable more context or turn off the Agent scope sandbox.";
 
 /** SDK-side shape of the `AskUserQuestion` tool input. */
 export interface AskUserQuestionInput {
@@ -71,6 +95,21 @@ export interface PermissionBridgeOptions {
    * backend.
    */
   getIsReadOnlySession?: () => ((sessionId: SessionId) => boolean) | null;
+  /**
+   * Selected-context sandbox (`agentScopeMode: "selected-context"`): when the
+   * session carries a scope, `Write`/`Edit`/`NotebookEdit` calls whose target
+   * path resolves outside the selected files/folders are hard-denied. Reads,
+   * Bash, and search tools are untouched (read stays broad by design; Bash
+   * already routes through the prompter). Checked AFTER the read-only
+   * hard-deny and the plan-file auto-allow — plan files live under
+   * `~/.claude/plans/`, outside any vault scope, so the plan predicate must
+   * keep winning for its own paths.
+   *
+   * Lazy like the other getters so the manager can register it after the
+   * backend is constructed. `undefined` / `null` / mode-off → no gating and
+   * byte-identical behavior to a bridge without this option.
+   */
+  getScopeSandbox?: () => ScopeSandbox | null | undefined;
 }
 
 /** Translates Claude tool requests for one immutable backend session. */
@@ -124,6 +163,22 @@ export class PermissionBridge {
         const result: PermissionResult = { behavior: "allow", updatedInput: input };
         logSdkOutbound("canUseTool:response:auto-allow-plan", result, sessionId);
         return result;
+      }
+    }
+
+    // Selected-context sandbox: deny write-tool calls aimed outside the scope.
+    // Runs after the read-only hard-deny and the plan-file auto-allow (plan
+    // files sit outside any vault scope, so the plan predicate must keep
+    // winning for its own paths) and before the prompter fallback.
+    if (toolName === "Write" || toolName === "Edit" || toolName === "NotebookEdit") {
+      const targetPath =
+        typeof input.file_path === "string"
+          ? input.file_path
+          : typeof input.notebook_path === "string"
+            ? input.notebook_path
+            : null;
+      if (targetPath && isOutsideScope(targetPath, this.opts.getScopeSandbox?.() ?? null)) {
+        return this.deny("canUseTool:response", SCOPE_SANDBOX_DENY_MESSAGE, sessionId);
       }
     }
 
@@ -192,6 +247,69 @@ const STANDARD_OPTION_NAMES: Record<PermissionOptionKind, string> = {
   reject_once: "Deny once",
   reject_always: "Deny always",
 };
+
+/**
+ * True when `targetPath` resolves OUTSIDE the selected-context sandbox, i.e.
+ * it is neither a selected file, nor inside a selected folder, nor under an
+ * absolute folder root. Absolute paths are normalized against `vaultRoot`
+ * (forward slashes, trailing separators stripped) so `/vault/notes/a.md` and
+ * `notes/a.md` compare equal; segment-boundary matching prevents
+ * `/vault-other/x` from passing as `/vault/x`. No scope → not outside, so the
+ * bridge behaves exactly as before the option existed. An absolute path that
+ * cannot be resolved against the vault root is only contained by
+ * `absoluteFolders` — anything else is outside (fail closed: the sandbox
+ * exists to stop unselected writes).
+ */
+function isOutsideScope(targetPath: string, sandbox: ScopeSandbox | null): boolean {
+  if (!sandbox) return false;
+  const rel = normalizeVaultRelative(targetPath, sandbox.vaultRoot ?? null);
+  if (rel === null) {
+    // Not resolvable against the vault root (or no root): only absolute folder
+    // roots can still contain it.
+    const abs = normalizeSlashes(targetPath);
+    return !isUnderAny(abs, sandbox.absoluteFolders);
+  }
+  if (isUnderAny(rel, sandbox.vaultRelativeFiles)) return false;
+  if (isUnderAny(rel, sandbox.vaultRelativeFolders)) return false;
+  const abs = sandbox.vaultRoot
+    ? `${normalizeSlashes(sandbox.vaultRoot)}/${rel}`
+    : normalizeSlashes(targetPath);
+  return !isUnderAny(abs, sandbox.absoluteFolders);
+}
+
+function normalizeSlashes(p: string): string {
+  return p.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+/**
+ * Convert an absolute target path into a forward-slashed vault-relative path.
+ * Returns the path unchanged when it is already relative; returns null when it
+ * is absolute but no vault root is known (or it lies outside the vault).
+ */
+function normalizeVaultRelative(p: string, vaultRoot: string | null): string | null {
+  if (!isAbsolutePath(p)) return p;
+  if (!vaultRoot) return null;
+  const base = normalizeSlashes(vaultRoot);
+  const norm = normalizeSlashes(p);
+  if (norm === base) return "";
+  if (!norm.startsWith(`${base}/`)) return null;
+  return norm.slice(base.length + 1);
+}
+
+/**
+ * Segment-boundary prefix match against a set of candidate roots. An empty
+ * root (`""`) matches everything — an explicitly selected vault root scopes
+ * in the whole vault.
+ */
+function isUnderAny(p: string, roots: Iterable<string> | undefined): boolean {
+  if (!roots) return false;
+  for (const root of roots) {
+    const r = normalizeSlashes(root);
+    if (r === "" || p === r || p.startsWith(`${r}/`)) return true;
+  }
+  return false;
+}
+
 const STANDARD_OPTIONS: PermissionOption[] = PERMISSION_OPTION_KINDS.map((kind) => ({
   optionId: kind,
   name: STANDARD_OPTION_NAMES[kind],

@@ -7,13 +7,19 @@ import { compactXmlBlock, getL2RefetchInstruction } from "@/context/L2ContextCom
 import { CONTEXT_BLOCK_TYPES } from "@/context/contextBlockRegistry";
 import { parseContextIntoSegments } from "@/context/parseContextSegments";
 import {
+  buildStrictContextScope,
+  filterFilesToStrictContext,
+  filterFilesToStrictFolders,
+  type StrictContextScope,
+} from "@/context/strictContextScope";
+import {
   PromptContextEnvelope,
   PromptLayerId,
   PromptLayerSegment,
 } from "@/context/PromptContextTypes";
 import { ContextProcessor } from "@/contextProcessor";
-import { logInfo } from "@/logger";
-import { Mention } from "@/mentions/Mention";
+import type { SourceReference } from "@/context/sourceReferences";
+import { logInfo, logWarn } from "@/logger";
 import { getSettings } from "@/settings/model";
 import { FileParserManager } from "@/tools/FileParserManager";
 import { ChatMessage } from "@/types/message";
@@ -23,6 +29,7 @@ import { MessageRepository } from "./MessageRepository";
 
 // Lazy-loaded to avoid circular dependency issues in tests
 let ContextCompactorClass: typeof import("./ContextCompactor").ContextCompactor | null = null;
+const EMPTY_SOURCE_REFERENCES: readonly SourceReference[] = Object.freeze([]);
 async function getContextCompactor() {
   if (!ContextCompactorClass) {
     const module = await import("./ContextCompactor");
@@ -43,12 +50,10 @@ async function getContextCompactor() {
 export class ContextManager {
   private static instance: ContextManager;
   private contextProcessor: ContextProcessor;
-  private mention: Mention;
   private promptContextEngine: PromptContextEngine;
 
   private constructor() {
     this.contextProcessor = ContextProcessor.getInstance();
-    this.mention = Mention.getInstance();
     this.promptContextEngine = PromptContextEngine.getInstance();
   }
 
@@ -93,14 +98,7 @@ export class ContextManager {
       // 2. Build L2 context from previous turns (uses stored envelope content, preserves compaction)
       const { l2Context, l2Paths } = this.buildL2ContextFromPreviousTurns(message.id!, messageRepo);
 
-      // 3. Extract URLs and process them (for Copilot Plus chain)
-      const contextUrls = message.context?.urls || [];
-      const urlContextAddition =
-        chainType === ChainType.COPILOT_PLUS_CHAIN
-          ? await this.mention.processUrlList(vault, contextUrls)
-          : { urlContext: "", imageUrls: [] };
-
-      // 4. Process context notes (L3 - current turn only, excluding files already in L2 or system prompt)
+      // 3. Process context notes (L3 - current turn only, excluding files already in L2 or system prompt)
       // Combine exclusions: custom prompt files + system prompt files + files already in L2
       const processedNotePaths = new Set([
         ...includedFiles.map((file) => file.path),
@@ -110,14 +108,54 @@ export class ContextManager {
       // Track only L3 context paths (excludes L5 user message files from includedFiles)
       // This is used for compactedPaths to avoid false deduplication of L5 files
       const l3ContextPaths = new Set<string>();
-      const contextNotes = message.context?.notes || [];
+      const contextSources: SourceReference[] = [];
+      const collectContextSources = (sources: readonly SourceReference[]): void => {
+        contextSources.push(...sources);
+      };
+      const requestedContextNotes = message.context?.notes || [];
+      const requestedContextFolders = message.context?.folders || [];
+      const strictContextEnabled = getSettings().strictContextScope === true;
+      const strictInventory = strictContextEnabled ? getVaultFilesForStrictContext(vault) : [];
+      const strictScopeResult = strictContextEnabled
+        ? buildStrictContextScope(
+            requestedContextNotes,
+            requestedContextFolders,
+            strictInventory.map((file) => file.path)
+          )
+        : null;
+
+      if (strictScopeResult && strictScopeResult.rejected.length > 0) {
+        logWarn(
+          `[ContextManager] Strict context omitted ${strictScopeResult.rejected.length} invalid or stale selection(s)`
+        );
+      }
+
+      // In strict mode, resolve explicit file selections back to the current
+      // vault inventory. A persisted/plain-object TFile or a renamed file must
+      // not be allowed to select a new path merely because it has a matching
+      // `path` field. Folder selections are handled separately below so the
+      // provenance label remains accurate in the prompt envelope.
+      const explicitStrictScope: StrictContextScope | null = strictScopeResult
+        ? {
+            filePaths: strictScopeResult.scope.filePaths,
+            folderPaths: new Set<string>(),
+          }
+        : null;
+      const contextNotes = strictScopeResult
+        ? filterFilesToStrictContext(strictInventory, explicitStrictScope!)
+        : requestedContextNotes;
 
       // Filter out notes already in L2 to avoid duplication
       const notes = contextNotes.filter((note) => !l2Paths.has(note.path));
 
+      const activeNoteIsInStrictInventory =
+        !strictScopeResult ||
+        (activeNote !== null && strictInventory.some((file) => file.path === activeNote.path));
+      const includeActiveNoteForContext = includeActiveNote && activeNoteIsInStrictInventory;
+
       // Add active note if requested and not already in L2
       if (
-        includeActiveNote &&
+        includeActiveNoteForContext &&
         activeNote &&
         !processedNotePaths.has(activeNote.path) &&
         !notes.some((note) => note.path === activeNote.path)
@@ -130,9 +168,9 @@ export class ContextManager {
         fileParserManager,
         vault,
         notes,
-        includeActiveNote,
+        includeActiveNoteForContext,
         activeNote,
-        chainType
+        collectContextSources
       );
 
       // Add processed context notes to tracking sets
@@ -141,7 +179,7 @@ export class ContextManager {
         l3ContextPaths.add(note.path);
       });
 
-      // 5. Process context tags
+      // 4. Process context tags
       const contextTags = message.context?.tags || [];
       let tagContextAddition = "";
       const tagNotePaths: string[] = [];
@@ -163,7 +201,7 @@ export class ContextManager {
             filteredTaggedNotes,
             false, // Don't include active note again
             null,
-            chainType
+            collectContextSources
           );
 
           // Add processed tagged notes to tracking sets and collect paths
@@ -175,14 +213,18 @@ export class ContextManager {
         }
       }
 
-      // 6. Process context folders
-      const contextFolders = message.context?.folders || [];
+      // 5. Process context folders
+      const contextFolders = strictScopeResult
+        ? Array.from(strictScopeResult.scope.folderPaths, (folderPath) => folderPath || "/")
+        : requestedContextFolders;
       let folderContextAddition = "";
       const folderNotePaths: string[] = [];
 
       if (contextFolders.length > 0) {
         // Get all notes from the specified folders
-        const folderNotes = contextFolders.flatMap((folder) => getNotesFromPath(vault, folder));
+        const folderNotes = strictScopeResult
+          ? filterFilesToStrictFolders(strictInventory, strictScopeResult.scope.folderPaths)
+          : contextFolders.flatMap((folder) => getNotesFromPath(vault, folder));
 
         // Filter out already processed notes to avoid duplication
         const filteredFolderNotes = folderNotes.filter(
@@ -197,7 +239,7 @@ export class ContextManager {
             filteredFolderNotes,
             false, // Don't include active note again
             null,
-            chainType
+            collectContextSources
           );
 
           // Add processed folder notes to tracking sets and collect paths
@@ -209,27 +251,26 @@ export class ContextManager {
         }
       }
 
-      // 7. Process selected text contexts
+      // 6. Process selected text contexts
       const selectedTextContextAddition = this.contextProcessor.processSelectedTextContexts();
 
-      // 8. Process web tab contexts (L3 - current turn only)
+      // 7. Process web tab contexts (L3 - current turn only)
       const webTabs = message.context?.webTabs || [];
       const webTabContextAddition = await this.contextProcessor.processContextWebTabs(webTabs);
 
-      // 9. Build context portion separately (for compaction boundary preservation)
+      // 8. Build context portion separately (for compaction boundary preservation)
       const contextPortion =
         l2Context +
         noteContextAddition +
         tagContextAddition +
         folderContextAddition +
-        urlContextAddition.urlContext +
         selectedTextContextAddition +
         webTabContextAddition;
 
       // Combine everything (L2 previous context, then L3 current turn context)
       let finalProcessedMessage = processedUserMessage + contextPortion;
 
-      // 10. Auto-compact if context exceeds threshold (tokens * 4 = chars estimate)
+      // 9. Auto-compact if context exceeds threshold (tokens * 4 = chars estimate)
       const charThreshold = getSettings().autoCompactThreshold * 4;
 
       let wasCompacted = false;
@@ -275,7 +316,6 @@ export class ContextManager {
             tagNotePaths,
             folderContextAddition,
             folderNotePaths,
-            urlContext: urlContextAddition.urlContext,
             selectedText: selectedTextContextAddition,
             webTabContext: webTabContextAddition,
           });
@@ -283,6 +323,7 @@ export class ContextManager {
       return {
         processedContent: finalProcessedMessage,
         contextEnvelope,
+        sources: contextSources.length > 0 ? contextSources : EMPTY_SOURCE_REFERENCES,
       };
     } catch (error) {
       logInfo(`[ContextManager] Error processing context for message ${message.id}:`, error);
@@ -317,7 +358,7 @@ export class ContextManager {
 
     logInfo(`[ContextManager] Reprocessing context for message ${messageId}`);
 
-    const { processedContent, contextEnvelope } = await this.processMessageContext(
+    const { processedContent, contextEnvelope, sources } = await this.processMessageContext(
       app,
       message,
       fileParserManager,
@@ -330,7 +371,11 @@ export class ContextManager {
       systemPromptIncludedFiles
     );
 
-    messageRepo.updateProcessedText(message.id, processedContent, contextEnvelope);
+    if (sources !== undefined) {
+      messageRepo.updateProcessedText(message.id, processedContent, contextEnvelope, sources);
+    } else {
+      messageRepo.updateProcessedText(message.id, processedContent, contextEnvelope);
+    }
     logInfo(`[ContextManager] Completed context reprocessing for message ${messageId}`);
   }
 
@@ -504,7 +549,6 @@ export class ContextManager {
       source: "folders",
       notePaths: params.folderNotePaths,
     });
-    this.appendParsedSegments(turnSegments, params.urlContext);
     this.appendParsedSegments(turnSegments, params.selectedText);
     this.appendParsedSegments(turnSegments, params.webTabContext);
 
@@ -721,6 +765,7 @@ export class ContextManager {
 export interface ContextProcessingResult {
   processedContent: string;
   contextEnvelope?: PromptContextEnvelope;
+  sources?: readonly SourceReference[];
 }
 
 interface BuildPromptContextEnvelopeParams {
@@ -734,7 +779,28 @@ interface BuildPromptContextEnvelopeParams {
   tagNotePaths: string[];
   folderContextAddition: string;
   folderNotePaths: string[];
-  urlContext: string;
   selectedText: string;
   webTabContext: string;
+}
+
+/**
+ * Return the current vault inventory for the strict @file/@folder boundary.
+ * The fallback keeps the policy usable with older/test Vault facades while
+ * remaining fail-closed for non-Markdown files when `getFiles()` is absent.
+ */
+function getVaultFilesForStrictContext(vault: Vault): TFile[] {
+  try {
+    const vaultWithAllFiles = vault as Vault & { getFiles?: () => TFile[] };
+    if (typeof vaultWithAllFiles.getFiles === "function") {
+      const files = vaultWithAllFiles.getFiles();
+      return Array.isArray(files) ? files : [];
+    }
+    const markdownFiles = vault.getMarkdownFiles();
+    return Array.isArray(markdownFiles) ? markdownFiles : [];
+  } catch (error) {
+    // A missing/unavailable inventory must result in no selected files, never
+    // in a fallback to fuzzy path matching or an unrestricted vault read.
+    logWarn("[ContextManager] Strict context could not enumerate the vault", error);
+    return [];
+  }
 }

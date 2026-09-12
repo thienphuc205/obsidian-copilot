@@ -39,7 +39,6 @@ import { cn } from "@/lib/utils";
 import { logError } from "@/logger";
 import { ActiveFileProvider } from "./context/ActiveFileContext";
 import { CloudAgentProvider, EMPTY_CLOUD_AGENT_IDS } from "./context/CloudAgentContext";
-import { ChainType } from "@/chainType";
 import { useSettingsValue } from "@/settings/model";
 import { type AgentMentionBrand, EMPTY_AGENT_MENTION_BRANDS } from "./hooks/useAtMentionCategories";
 
@@ -81,11 +80,9 @@ interface LexicalEditorProps {
   onEditorReady?: (editor: LexicalEditorType) => void;
   onImagePaste?: (files: File[]) => void;
   onTagSelected?: () => void;
-  isCopilotPlus?: boolean;
   /** Whether to surface Copilot built-in `@` tools in the typeahead. */
   showTools?: boolean;
   currentActiveFile?: TFile | null;
-  currentChain?: ChainType;
   onEscape?: () => void;
   onShiftTab?: () => void;
 }
@@ -118,10 +115,8 @@ const LexicalEditor: React.FC<LexicalEditorProps> = ({
   onEditorReady,
   onImagePaste,
   onTagSelected,
-  isCopilotPlus = false,
   showTools = false,
   currentActiveFile = null,
-  currentChain,
   onEscape,
   onShiftTab,
 }) => {
@@ -272,15 +267,9 @@ const LexicalEditor: React.FC<LexicalEditorProps> = ({
             <PillDeletionPlugin />
             <PastePlugin enableURLPills={!!onURLsChange} onImagePaste={onImagePaste} />
             <SlashCommandPlugin />
-            <NoteCommandPlugin
-              isCopilotPlus={isCopilotPlus}
-              currentActiveFile={currentActiveFile}
-            />
-            {currentChain && currentChain !== ChainType.LLM_CHAIN && (
-              <TagCommandPlugin onTagSelected={onTagSelected} />
-            )}
+            <NoteCommandPlugin currentActiveFile={currentActiveFile} />
+            <TagCommandPlugin onTagSelected={onTagSelected} />
             <AtMentionCommandPlugin
-              isCopilotPlus={isCopilotPlus}
               showTools={showTools}
               currentActiveFile={currentActiveFile}
               agentBrands={agentBrands}

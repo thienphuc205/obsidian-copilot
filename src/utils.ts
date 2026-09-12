@@ -2,14 +2,12 @@
 // so the same Buffer code path works on desktop (Electron) and mobile (WebView).
 import { Buffer } from "buffer/";
 
-import { ChainType } from "@/chainType";
 import {
   ALLOWED_NOTE_CONTEXT_EXTENSIONS,
   ModelCapability,
   TEXT_READABLE_EXTENSIONS,
 } from "@/constants";
 import { logInfo, logWarn } from "@/logger";
-import { formatUsageCapError } from "@/utils/usageCapError";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { MemoryVariables } from "@langchain/core/memory";
 import { DateTime } from "luxon";
@@ -83,12 +81,6 @@ function isLicenseKeyError(error: unknown): boolean {
 export function getApiErrorMessage(error: unknown): string {
   if (isLicenseKeyError(error)) {
     return ERROR_MESSAGES.INVALID_LICENSE_KEY_USER;
-  }
-  // Usage-cap (plan limit) errors get a friendly, actionable message with a link to
-  // the usage dashboard to purchase credits, instead of the raw relay error text.
-  const capMessage = formatUsageCapError(error);
-  if (capMessage) {
-    return capMessage;
   }
   const errorDetail = extractErrorDetail(error);
   return (
@@ -406,32 +398,14 @@ export function isAllowedFileForNoteContext(file: TFile | null): boolean {
 }
 
 /**
- * Checks if a chain type is a Plus mode chain.
- * Plus mode chains have access to premium features like PDF processing and URL processing.
- * @param chainType The chain type to check
- * @returns true if this is a Plus mode chain, false otherwise
- */
-export function isPlusChain(chainType: ChainType): boolean {
-  return chainType === ChainType.COPILOT_PLUS_CHAIN;
-}
-
-/**
- * Checks if a file extension is allowed for context based on the chain type.
- * All chains support text-readable files (md, canvas, base).
- * Plus chains additionally support PDF, EPUB, PPT, DOCX, etc.
+ * Checks if a file extension is allowed for context.
+ * All chains support text-readable files (md, canvas, base) plus any
+ * locally-parsed type (PDF via the bundled parser, EPUB via Miyo).
  * @param file The file to check
- * @param chainType The current chain type
- * @returns true if the file is allowed for this chain type, false otherwise
+ * @returns true if the file can be included, false otherwise
  */
-export function isAllowedFileForChainContext(file: TFile | null, chainType: ChainType): boolean {
-  if (!file) return false;
-
-  if (isTextReadableFile(file)) {
-    return true;
-  }
-
-  // Plus chains support all other file types (PDF, EPUB, PPT, DOCX, etc.)
-  return isPlusChain(chainType);
+export function isAllowedFileForChainContext(file: TFile | null): boolean {
+  return Boolean(file);
 }
 
 export interface ChatHistoryEntry {
@@ -443,7 +417,7 @@ export interface ChatHistoryEntry {
  * Extract text-only chat history from memory variables.
  * This function pairs messages by index (i, i+1) and returns only string content.
  *
- * Note: For multimodal chains (CopilotPlus, AutonomousAgent), use
+ * Note: For multimodal chains, use
  * chatHistoryUtils.processRawChatHistory instead to preserve image content.
  *
  * @param memoryVariables Memory variables from LangChain memory

@@ -1,10 +1,8 @@
-import { BREVILABS_API_BASE_URL } from "@/constants";
 import { type CopilotSettings, getSettings } from "@/settings/model";
 import { getMiyoCustomUrl } from "@/miyo/miyoUtils";
 import {
   MIYO_SEARCH_FOLDER_ENV,
   MIYO_SEARCH_SCOPE_ENV,
-  PLUS_ENV,
   SELF_HOST_WEB_SEARCH_ENV,
   SELF_HOST_WEB_SEARCH_TOKEN_ENV,
   SELF_HOST_WEB_SEARCH_URL_ENV,
@@ -35,16 +33,11 @@ const EMPTY_MANAGED_ENV: Readonly<Record<string, string>> = Object.freeze({});
  * Build the plugin-managed environment for builtin skill scripts. Composes
  * independent contributions. Ordinary values are merged before the user's
  * `envOverrides`; the Miyo vault-isolation inputs are protected by each
- * backend. Credentials live only in the agent subprocess env (never written to
- * disk in the skill files):
+ * backend:
  *
  * - **Obsidian CLI** (`COPILOT_OBSIDIAN_CLI`): terminal-capable executable
  *   shipped with the running desktop install, when present. This avoids
  *   depending on the agent backend's `PATH`.
- * - **Copilot Plus relay** (`COPILOT_PLUS_*`): decrypted license key + relay
- *   base URL + user id + client version, only for an active Plus subscriber with
- *   a key on file. Absent otherwise, so the relay skills exit with the upgrade
- *   prompt.
  * - **Host review** (`OPENARTIFACTS_WORKSPACE_ROOT_ENV`): owning workspace used to
  *   stage HTML and derive the wrapper's explicit Obsidian CLI vault target.
  * - **Self-host web search**: a mode marker and per-lifecycle loopback channel
@@ -53,9 +46,9 @@ const EMPTY_MANAGED_ENV: Readonly<Record<string, string>> = Object.freeze({});
  *   the bundled `miyo` CLI targets their configured service instead of local
  *   loopback discovery (the only way Miyo works on mobile or against a remote
  *   host). `COPILOT_MIYO_SEARCH_*` also carries the authoritative Search scope
- *   and active vault name. Independent of Plus — self-host users may use Miyo
- *   without a license.
- * @param clientVersion Version reported to the Copilot Plus relay.
+ *   and active vault name.
+ * @param clientVersion Retained for spawn-env call-site compatibility; no
+ *   managed value reads it anymore.
  * @param workspaceRootAbs Absolute host workspace root used by portable skills.
  * @param vaultName Exact active-vault name used by vault-scoped skills.
  * @param selfHostSearchChannel Plugin-owned endpoint and token for Self-Host search.
@@ -102,16 +95,6 @@ export async function buildBuiltinSkillEnv(
     if (vaultName) env[MIYO_SEARCH_FOLDER_ENV] = vaultName;
   }
 
-  // Copilot Plus relay env — gated on an active subscription with a usable key.
-  if (settings.isPaidUser && settings.plusLicenseKey) {
-    // Relay skills still require the raw Plus credential in the agent process.
-    // Do not create service-specific aliases; scoped agent credentials remain separate work.
-    env[PLUS_ENV.licenseKey] = settings.plusLicenseKey;
-    env[PLUS_ENV.baseUrl] = BREVILABS_API_BASE_URL;
-    env[PLUS_ENV.userId] = settings.userId ?? "";
-    env[PLUS_ENV.clientVersion] = clientVersion;
-  }
-
   return Object.keys(env).length === 0 ? EMPTY_MANAGED_ENV : env;
 }
 
@@ -148,10 +131,7 @@ export function getBuiltinSkillEnvRestartPolicy(
   next: CopilotSettings,
   backendId: BackendId
 ): "none" | "deferred" | "immediate" {
-  const ordinaryEnvChanged =
-    prev.isPaidUser !== next.isPaidUser ||
-    prev.plusLicenseKey !== next.plusLicenseKey ||
-    prev.miyoServerUrl !== next.miyoServerUrl;
+  const ordinaryEnvChanged = prev.miyoServerUrl !== next.miyoServerUrl;
   const selfHostRoutingChanged =
     backendId === "opencode" && prev.enableSelfHostMode !== next.enableSelfHostMode;
   // Scope changes only affect a currently enabled skill. Tightening an active

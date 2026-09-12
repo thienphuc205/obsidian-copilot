@@ -1,7 +1,16 @@
-import { Pdf4llmResponse } from "@/LLMProviders/brevilabsClient";
 import { logError, logInfo } from "@/logger";
 import { md5 } from "@/utils/hash";
 import { TFile, Vault } from "obsidian";
+
+/**
+ * Stored PDF conversion result. The shape historically came from a hosted
+ * relay's pdf4llm response; the cache now stores local and Miyo conversions in
+ * the same `{ response }` shape so pre-existing entries keep loading.
+ */
+export interface PdfConversionResponse {
+  response: string;
+  elapsed_time_ms?: number;
+}
 
 export class PDFCache {
   private static instance: PDFCache;
@@ -24,19 +33,15 @@ export class PDFCache {
   }
 
   private getCacheKey(file: TFile): string {
-    // DESIGN NOTE: the key is keyed on the FILE only (path/size/mtime), NOT on the
-    // doc-processor backend (Plus vs Miyo) that produced the conversion. This is
-    // intentional. A PDF→markdown conversion is "the text of this file"; both
-    // backends target the same result, so a cached conversion is reusable
-    // regardless of which produced it. Users switch backend for COST (e.g. Plus
-    // credits ran out → switch to local Miyo), not because they distrust an
-    // existing conversion — so reusing a prior result is the desired behavior, and
-    // re-converting an unchanged PDF just to match the current backend would waste
-    // credits / local work. Privacy is unaffected: a cache hit returns the stored
-    // text and calls NO backend (see FileParserManager.parseFile — the cache read
-    // happens BEFORE the plus/miyo decision), so switching to Miyo and reusing a
-    // Plus-era cache entry produces no new cloud egress.
-    // If a future review flags "cache ignores the backend", point them at this note.
+    // DESIGN NOTE: the key is keyed on the FILE only (path/size/mtime), NOT on
+    // the doc-processor backend that produced the conversion. This is
+    // intentional. A PDF→markdown conversion is "the text of this file", so a
+    // cached conversion is reusable regardless of which processor produced it;
+    // re-converting an unchanged PDF would waste local work. Privacy is
+    // unaffected: a cache hit returns stored text and calls no backend. The
+    // bundled local parser is intentionally probed BEFORE this cache and
+    // bypasses it, so a local-first install cannot reuse a relay-era conversion
+    // without parsing its own bytes.
     const metadata = `${file.path}:${file.stat.size}:${file.stat.mtime}`;
     const key = md5(metadata);
     logInfo("Generated cache key for PDF:", { path: file.path, key });
@@ -47,7 +52,7 @@ export class PDFCache {
     return `${this.cacheDir}/${cacheKey}.json`;
   }
 
-  async get(vault: Vault, file: TFile): Promise<Pdf4llmResponse | null> {
+  async get(vault: Vault, file: TFile): Promise<PdfConversionResponse | null> {
     try {
       const cacheKey = this.getCacheKey(file);
       const cachePath = this.getCachePath(cacheKey);
@@ -55,7 +60,7 @@ export class PDFCache {
       if (await vault.adapter.exists(cachePath)) {
         logInfo("Cache hit for PDF:", file.path);
         const cacheContent = await vault.adapter.read(cachePath);
-        return JSON.parse(cacheContent) as Pdf4llmResponse;
+        return JSON.parse(cacheContent) as PdfConversionResponse;
       }
       logInfo("Cache miss for PDF:", file.path);
       return null;
@@ -65,7 +70,7 @@ export class PDFCache {
     }
   }
 
-  async set(vault: Vault, file: TFile, response: Pdf4llmResponse): Promise<void> {
+  async set(vault: Vault, file: TFile, response: PdfConversionResponse): Promise<void> {
     try {
       await this.ensureCacheDir(vault);
       const cacheKey = this.getCacheKey(file);

@@ -3,39 +3,14 @@ import {
   MIYO_PARSE_SKILL,
   MIYO_SEARCH_SKILL,
   planManagedBuiltins,
-  PLUS_ENV,
-  SELF_HOST_WEB_SEARCH_ENV,
-  SELF_HOST_WEB_SEARCH_TOKEN_ENV,
-  SELF_HOST_WEB_SEARCH_URL_ENV,
 } from "./builtinSkills";
-import {
-  OPENARTIFACTS_AGENT_HANDOFF_DIR,
-  OPENARTIFACTS_API_ORIGIN,
-  OPENARTIFACTS_MAX_HTML_BYTES,
-  OPENARTIFACTS_WORKSPACE_ROOT_ENV,
-} from "@/openArtifacts/constants";
-
-/** A script file shipped by a skill, matched by extension (".sh", ".cmd", ".ps1"). */
-function scriptOf(name: string, ext: ".sh" | ".cmd" | ".ps1" = ".sh"): string {
-  const skill = BUILTIN_SKILLS.find((s) => s.name === name);
-  if (!skill) throw new Error(`no builtin skill ${name}`);
-  const file = skill.files.find((f) => f.path.endsWith(ext));
-  if (!file) throw new Error(`skill ${name} ships no ${ext} script`);
-  return file.content;
-}
-
-const RELAY_SKILLS = BUILTIN_SKILLS.filter((skill) => skill.name.startsWith("copilot-"));
 
 describe("builtinSkills", () => {
   describe("BUILTIN_SKILLS", () => {
-    it("ships the approved Plus and Obsidian skills to all three agents", () => {
+    it("ships the Obsidian and workflow skills to all three agents", () => {
       expect(BUILTIN_SKILLS.map((s) => s.name)).toEqual([
-        "copilot-web-search",
-        "copilot-web-fetch",
-        "copilot-read-pdf",
-        "copilot-youtube-transcript",
-        "copilot-fetch-x",
-        "openartifacts-publish",
+        "research",
+        "read-scanned-pdf",
         "obsidian-markdown",
         "obsidian-bases",
         "json-canvas",
@@ -51,253 +26,10 @@ describe("builtinSkills", () => {
         expect(skill.skillMd).toContain(`copilot-builtin-version: "${skill.version}"`);
       }
     });
-
-    it("ships one runnable script per OS — POSIX sh + Windows cmd/ps1, no Node", () => {
-      for (const skill of RELAY_SKILLS) {
-        const sh = skill.files.find((f) => f.path.endsWith(".sh"));
-        const cmd = skill.files.find((f) => f.path.endsWith(".cmd"));
-        const ps1 = skill.files.find((f) => f.path.endsWith(".ps1"));
-        expect(sh).toBeDefined();
-        expect(cmd).toBeDefined();
-        expect(ps1).toBeDefined();
-        // The three scripts share a base name (web-search.sh ↔ .cmd ↔ .ps1).
-        expect(cmd!.path).toBe(sh!.path.replace(/\.sh$/, ".cmd"));
-        expect(ps1!.path).toBe(sh!.path.replace(/\.sh$/, ".ps1"));
-        // SKILL.md routes macOS/Linux at sh and Windows at the cmd wrapper (run
-        // with PowerShell's `&` call operator), with no Node anywhere.
-        expect(skill.skillMd).toContain(`sh "/absolute/path/to/this/skill/directory/${sh!.path}"`);
-        expect(skill.skillMd).toContain(`& "/absolute/path/to/this/skill/directory/${cmd!.path}"`);
-        expect(skill.skillMd).not.toContain("install Node.js");
-        expect(skill.skillMd).not.toContain("node ");
-        // No Node runtime ships anymore.
-        expect(skill.files.some((f) => f.path.endsWith(".mjs"))).toBe(false);
-        // The cmd launcher drives the sibling ps1 via Windows PowerShell with the
-        // execution policy relaxed, locating it relative to its own folder.
-        expect(cmd!.content).toContain("WindowsPowerShell\\v1.0\\powershell.exe");
-        expect(cmd!.content).toContain("-ExecutionPolicy Bypass");
-        expect(cmd!.content).toContain(`-File "%~dp0${ps1!.path}"`);
-      }
-    });
-
-    it("reads its config from the injected env and never embeds a key (both scripts)", () => {
-      for (const skill of RELAY_SKILLS) {
-        const sh = scriptOf(skill.name, ".sh");
-        expect(sh).toContain(`#!/bin/sh`);
-        expect(sh).toContain(PLUS_ENV.licenseKey);
-        expect(sh).toContain(PLUS_ENV.baseUrl);
-        // Auth flows through the env var, not a literal embedded key.
-        expect(sh).toContain("Authorization: Bearer $KEY");
-        expect(sh).toContain("X-Client-Version: $CLIENT_VERSION");
-        // Guard + soft fallback when the license/relay config is absent.
-        expect(sh).toContain("require_relay()");
-        expect(sh).toContain("require_relay\n");
-        expect(sh).toContain("Copilot Plus");
-
-        const ps1 = scriptOf(skill.name, ".ps1");
-        expect(ps1).toContain(`[Environment]::GetEnvironmentVariable('${PLUS_ENV.licenseKey}')`);
-        expect(ps1).toContain(`[Environment]::GetEnvironmentVariable('${PLUS_ENV.baseUrl}')`);
-        expect(ps1).toContain('Authorization = "Bearer $KEY"');
-        expect(ps1).toContain("'X-Client-Version' = $CLIENT_VERSION");
-        // Same license guard as the shell script.
-        expect(ps1).toContain("function RequireRelay");
-        expect(ps1).toContain("RequireRelay\n");
-        expect(ps1).toContain("Copilot Plus");
-        // The body is sent as explicit UTF-8 bytes — Windows PowerShell 5.1 would
-        // otherwise ASCII-encode a string body and corrupt non-ASCII input.
-        expect(ps1).toContain("[System.Text.Encoding]::UTF8.GetBytes($json)");
-        expect(ps1).toContain("application/json; charset=utf-8");
-        expect(ps1).toContain("-Body $bytes");
-        // Output side: force UTF-8 so non-ASCII relay output isn't mojibaked by
-        // Windows PowerShell 5.1's default code-page console encoding.
-        expect(ps1).toContain("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8");
-        expect(ps1).toContain("$OutputEncoding = [System.Text.Encoding]::UTF8");
-      }
-    });
-
-    it("falls back to the agent's own tools instead of blocking when Plus is absent", () => {
-      for (const skill of RELAY_SKILLS) {
-        const sh = scriptOf(skill.name, ".sh");
-        // No license: tell the agent to use its own equivalent tools, never
-        // refuse, and only append the upsell occasionally (gated on the pid). The
-        // fallback wording is generic (not web-specific) so it suits the PDF skill
-        // too, which shares this message.
-        expect(sh).toContain("your own equivalent built-in tools");
-        expect(sh).not.toContain("web tools");
-        expect(sh).toContain("never refuse");
-        expect(sh).toContain("$(( $$ % 4 ))");
-        // The upsell carries the actionable instruction to obtain a license key.
-        expect(sh).toContain("get a license key at https://www.obsidiancopilot.com");
-        // The invalid/expired-license (401/403) path is distinct and warrants a
-        // renewal note, but still falls back rather than refusing.
-        expect(sh).toContain('401|403) die "$LICENSE_INVALID"');
-        expect(sh).toContain("renew their Copilot Plus license");
-        // The old hard "requires Copilot Plus / upgrade" block is gone.
-        expect(sh).not.toContain("require Copilot Plus");
-
-        // A non-license relay failure (unreachable, or a non-2xx that isn't
-        // 401/403 — e.g. a page that can't be fetched) still routes the agent to
-        // its own tool rather than dead-ending the request.
-        expect(sh).toContain("$RELAY_FAILED_FALLBACK");
-        expect(sh).toContain("your own equivalent built-in tool for this");
-
-        const ps1 = scriptOf(skill.name, ".ps1");
-        expect(ps1).toContain("your own equivalent built-in tools");
-        expect(ps1).not.toContain("web tools");
-        expect(ps1).toContain("($PID % 4) -eq 0");
-        expect(ps1).toContain("Die $LICENSE_INVALID");
-        expect(ps1).toContain("RELAY_FAILED_FALLBACK");
-      }
-    });
-
-    it("includes the firecrawl-backed web-fetch skill targeting /url4llm", () => {
-      expect(scriptOf("copilot-web-fetch", ".sh")).toContain('relay "/url4llm"');
-      expect(scriptOf("copilot-web-fetch", ".sh")).toContain('\\"url\\"');
-      expect(scriptOf("copilot-web-fetch", ".ps1")).toContain('Invoke-Relay "/url4llm"');
-      expect(scriptOf("copilot-web-fetch", ".ps1")).toContain(
-        "@{ url = $ARG; user_id = $USER_ID }"
-      );
-    });
-
-    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/165 routes Self-Host web search through the plugin-owned channel without the optional Obsidian CLI", () => {
-      const sh = scriptOf("copilot-web-search", ".sh");
-      expect(sh).toContain(SELF_HOST_WEB_SEARCH_ENV);
-      expect(sh).toContain(SELF_HOST_WEB_SEARCH_URL_ENV);
-      expect(sh).toContain(SELF_HOST_WEB_SEARCH_TOKEN_ENV);
-      expect(sh).toContain("curl --noproxy '*' -sS -X POST \"$SELF_HOST_URL\"");
-      expect(sh).toContain("--data-binary @-");
-      expect(sh).toContain("-w '\\n%{http_code}'");
-      expect(sh).toContain("printf '%s\\n' \"$RESPONSE_BODY\" >&2");
-      expect(sh).not.toContain("COPILOT_OBSIDIAN_CLI");
-      expect(sh).not.toContain("vault=$VAULT_NAME");
-      expect(sh.indexOf('if [ "$SELF_HOST" = "1" ]')).toBeLessThan(sh.indexOf("require_relay\n"));
-
-      const ps1 = scriptOf("copilot-web-search", ".ps1");
-      expect(ps1).toContain("Invoke-WebRequest");
-      expect(ps1).toContain("Bearer $SELF_HOST_TOKEN");
-      expect(ps1).toContain("[Console]::Out.WriteLine($response.Content)");
-      expect(ps1).not.toContain("COPILOT_OBSIDIAN_CLI");
-      expect(ps1.indexOf("if ($SELF_HOST -eq '1')")).toBeLessThan(ps1.indexOf("RequireRelay\n"));
-    });
-
-    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/165 fails Self-Host page fetch closed without invoking the hosted relay", () => {
-      const skill = BUILTIN_SKILLS.find((item) => item.name === "copilot-web-fetch");
-      expect(skill?.skillMd).toContain("never use an agent-native web");
-
-      const sh = scriptOf("copilot-web-fetch", ".sh");
-      expect(sh).toContain('if [ "$SELF_HOST" = "1" ]');
-      expect(sh).toContain("Do not use a native web-fetch tool");
-      expect(sh.indexOf("Do not use a native web-fetch tool")).toBeLessThan(
-        sh.indexOf("require_relay\n")
-      );
-
-      const ps1 = scriptOf("copilot-web-fetch", ".ps1");
-      expect(ps1).toContain("if ($SELF_HOST -eq '1')");
-      expect(ps1).toContain("Do not use a native web-fetch tool");
-      expect(ps1.indexOf("Do not use a native web-fetch tool")).toBeLessThan(
-        ps1.indexOf("RequireRelay\n")
-      );
-    });
-
-    it("maps each relay tool to its endpoint and request body (both scripts)", () => {
-      expect(scriptOf("copilot-web-search", ".sh")).toContain('relay "/websearch"');
-      expect(scriptOf("copilot-web-search", ".sh")).toContain('\\"query\\"');
-      expect(scriptOf("copilot-youtube-transcript", ".sh")).toContain('relay "/youtube4llm"');
-      expect(scriptOf("copilot-fetch-x", ".sh")).toContain('relay "/twitter4llm"');
-      // Single-arg tools JSON-escape the argument they pass.
-      expect(scriptOf("copilot-web-search", ".sh")).toContain('$(json_escape "$ARG")');
-
-      // The PowerShell sibling hits the same endpoints with a structured body.
-      expect(scriptOf("copilot-web-search", ".ps1")).toContain('Invoke-Relay "/websearch"');
-      expect(scriptOf("copilot-web-search", ".ps1")).toContain(
-        "@{ query = $ARG; user_id = $USER_ID }"
-      );
-      expect(scriptOf("copilot-youtube-transcript", ".ps1")).toContain(
-        'Invoke-Relay "/youtube4llm"'
-      );
-      expect(scriptOf("copilot-fetch-x", ".ps1")).toContain('Invoke-Relay "/twitter4llm"');
-    });
-
-    it("read-pdf base64-encodes the file into the pdf field (both scripts)", () => {
-      const sh = scriptOf("copilot-read-pdf", ".sh");
-      expect(sh).toContain('relay "/pdf4llm"');
-      expect(sh).toContain("base64");
-      expect(sh).toContain('\\"pdf\\"');
-
-      const ps1 = scriptOf("copilot-read-pdf", ".ps1");
-      expect(ps1).toContain('Invoke-Relay "/pdf4llm"');
-      expect(ps1).toContain(
-        "[System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($FILE))"
-      );
-      expect(ps1).toContain("@{ pdf = $PDF; user_id = $USER_ID }");
-    });
-
-    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/394 publishes over HTTPS with the injected license key and never touches the Obsidian CLI", () => {
-      const skill = BUILTIN_SKILLS.find((item) => item.name === "openartifacts-publish");
-      expect(skill).toBeDefined();
-      expect(skill!.version).toBe(2);
-      expect(skill!.retiredFiles).toEqual(["shared-publishing-rules.md"]);
-      expect(skill!.legacyName).toBe("symposium-publish");
-      expect(skill!.files.map((file) => file.path)).toEqual([
-        "themes/research-memo.md",
-        "openartifacts-publish.sh",
-        "openartifacts-publish.cmd",
-        "openartifacts-publish.ps1",
-      ]);
-
-      const md = skill!.skillMd;
-      expect(md).toContain(PLUS_ENV.licenseKey);
-      expect(md).toContain(
-        `$${OPENARTIFACTS_WORKSPACE_ROOT_ENV}/${OPENARTIFACTS_AGENT_HANDOFF_DIR}/`
-      );
-      expect(md).toContain(`\`${OPENARTIFACTS_MAX_HTML_BYTES}\` bytes`);
-      expect(md).toContain("Then end your turn");
-      expect(md).toContain("Never publish in the same turn that generated the HTML");
-      expect(md).toContain("Never simulate the user's approval");
-      expect(md).toContain("`openartifacts` frontmatter property");
-      expect(md).toContain("Themes are optional");
-      expect(md).toMatch(/a missing theme must never block publishing/);
-      expect(md).toContain("Report that message verbatim");
-      expect(md).toContain("unshare <docId>");
-      expect(md).toContain(
-        'sh "/absolute/path/to/this/skill/directory/openartifacts-publish.sh" publish'
-      );
-      expect(md).toContain(
-        '& "/absolute/path/to/this/skill/directory/openartifacts-publish.cmd" publish'
-      );
-      for (const gone of [
-        "require_escalated",
-        "openArtifactsAgentBridge",
-        "shared-publishing-rules",
-        "sandbox",
-        "modal",
-        "protected",
-      ]) {
-        expect(md).not.toContain(gone);
-      }
-
-      for (const script of [
-        scriptOf("openartifacts-publish", ".sh"),
-        scriptOf("openartifacts-publish", ".ps1"),
-      ]) {
-        expect(script).toContain(PLUS_ENV.licenseKey);
-        expect(script).toContain(OPENARTIFACTS_API_ORIGIN);
-        expect(script).toContain("OPENARTIFACTS_API_HOST");
-        expect(script).toContain("/api/v1/docs");
-        expect(script).toContain("Bearer");
-        expect(script).toContain("^[0-9abcdefghjkmnpqrstvwxyz]{16}$");
-        expect(script).not.toContain("COPILOT_OBSIDIAN_CLI");
-        expect(script).not.toContain("eval");
-        expect(script).not.toContain("OPENARTIFACTS_TOKEN");
-        expect(script).not.toContain("node ");
-      }
-      expect(scriptOf("openartifacts-publish", ".cmd")).toContain(
-        '-File "%~dp0openartifacts-publish.ps1"'
-      );
-    });
   });
 
   describe("MIYO_SEARCH_SKILL", () => {
-    it("is a separate, Miyo-gated skill — not one of the always-seeded Plus skills", () => {
+    it("is a separate, Miyo-gated skill — not one of the always-seeded builtins", () => {
       expect(BUILTIN_SKILLS.map((s) => s.name)).not.toContain("miyo-search");
       expect(MIYO_SEARCH_SKILL.name).toBe("miyo-search");
       expect(MIYO_SEARCH_SKILL.enabledAgents).toEqual(["claude", "codex", "opencode"]);
@@ -331,13 +63,6 @@ describe("builtinSkills", () => {
       expect(MIYO_SEARCH_SKILL.skillMd).toContain(
         `copilot-builtin-version: "${MIYO_SEARCH_SKILL.version}"`
       );
-    });
-
-    it("embeds no Plus license env — Miyo is a local loopback CLI", () => {
-      expect(MIYO_SEARCH_SKILL.skillMd).not.toContain(PLUS_ENV.licenseKey);
-      expect(MIYO_SEARCH_SKILL.skillMd).not.toContain(PLUS_ENV.baseUrl);
-      expect(miyoScript(".sh")).not.toContain(PLUS_ENV.licenseKey);
-      expect(miyoScript(".cmd")).not.toContain(PLUS_ENV.licenseKey);
     });
 
     it("documents concrete triggers for when to call it", () => {
@@ -381,7 +106,7 @@ describe("builtinSkills", () => {
         expect(script).toMatch(/active vault identity is missing/i);
         expect(script).toMatch(/invalid Search scope/i);
         expect(script).toMatch(/Do not (retry or )?run an unrestricted search/i);
-        expect(script).toMatch(/Update Miyo/i);
+        expect(script).toMatch(/Make sure the Miyo app is open/i);
       }
     });
 
@@ -435,21 +160,14 @@ describe("builtinSkills", () => {
 
     it("tells the agent to fail closed rather than reach for a cloud parser", () => {
       expect(MIYO_PARSE_SKILL.skillMd).toMatch(/Never fall back/i);
-      expect(MIYO_PARSE_SKILL.skillMd).toContain("copilot-read-pdf");
+      expect(MIYO_PARSE_SKILL.skillMd).toMatch(/cloud document parser/i);
     });
 
     it("names the recovery path when the CLI is absent, since a remote server can't parse", () => {
       // `miyo parse` runs locally and never reads MIYO_URL, so a remote-only
-      // user has to install the CLI or move the picker back to Plus.
+      // user has to install the CLI to use this skill.
       expect(MIYO_PARSE_SKILL.skillMd).toMatch(/remote\s+Miyo\s+server\s+does\s+not\s+help/i);
-      expect(MIYO_PARSE_SKILL.skillMd).toMatch(/Document\s+Processor to Plus/i);
-    });
-
-    it("does not embed Copilot Plus credentials", () => {
-      expect(MIYO_PARSE_SKILL.skillMd).not.toContain(PLUS_ENV.licenseKey);
-      expect(MIYO_PARSE_SKILL.skillMd).not.toContain(PLUS_ENV.baseUrl);
-      expect(miyoParseScript(".sh")).not.toContain(PLUS_ENV.licenseKey);
-      expect(miyoParseScript(".cmd")).not.toContain(PLUS_ENV.licenseKey);
+      expect(MIYO_PARSE_SKILL.skillMd).toMatch(/install Miyo on this machine/i);
     });
   });
 
@@ -472,22 +190,15 @@ describe("builtinSkills", () => {
       expect(planManagedBuiltins({ search: false, documents: true }).seed).toContain(
         MIYO_PARSE_SKILL
       );
-      expect(planManagedBuiltins({ search: false, documents: true }).prune).toContain(
-        "miyo-search"
-      );
+      expect(planManagedBuiltins({ search: false, documents: true }).prune).toEqual([
+        "miyo-search",
+      ]);
     });
 
-    it("replaces the cloud PDF skill with Miyo parse when Miyo owns documents", () => {
-      // Steering alone would leave copilot-read-pdf on disk, one ignored
-      // instruction away from uploading a document the user chose to keep local.
+    it("seeds both gated skills without touching the always-on set", () => {
       const plan = planManagedBuiltins({ search: true, documents: true });
-      expect(names(plan.seed)).not.toContain("copilot-read-pdf");
-      expect(plan.prune).toEqual(["copilot-read-pdf"]);
-      expect(names(plan.seed)).toEqual([
-        ...names(BUILTIN_SKILLS).filter((name) => name !== "copilot-read-pdf"),
-        "miyo-search",
-        "miyo-parse",
-      ]);
+      expect(names(plan.seed)).toEqual([...names(BUILTIN_SKILLS), "miyo-search", "miyo-parse"]);
+      expect(plan.prune).toEqual([]);
     });
   });
 });

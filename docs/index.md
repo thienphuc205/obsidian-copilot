@@ -24,6 +24,8 @@ For most people, opencode is the best starting point. Copilot can install and ma
 
 - [Copilot Commands and Quick Ask](custom-commands.md) reuse prompts or work with selected text without leaving the editor.
 - [Quick Chat](chat-interface.md) handles lightweight conversations and is the main chat view on mobile, where Agent Chat is unavailable.
+- [Local image preparation](local-images.md) explains explicit local saving and volatile Agent Chat staging without model upload.
+- [Custom Web API](custom-web-api.md) documents the normalized BYOK search and fetch contract for a user-owned public HTTPS service.
 
 ## Models, plans, and Miyo
 

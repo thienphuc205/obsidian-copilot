@@ -225,7 +225,6 @@ export const ClaudeBackendDescriptor: ClaudeDescriptor = {
   Icon: ClaudeLogo,
   // Cloud agent — flagged with a cloud-egress warning while Self-Host Mode is on.
   selfHostable: false,
-  routesCopilotModels: false,
   setupDescription:
     "Anthropic models, billed to your Claude Code subscription. Runs the claude CLI already on your machine.",
   skillsProjectDir: ".claude/skills",
@@ -368,6 +367,9 @@ export const ClaudeBackendDescriptor: ClaudeDescriptor = {
       app: args.app,
       clientVersion: args.clientVersion,
       descriptor: args.descriptor,
+      // Vault-selection sandbox scope, resolved per backend session by the
+      // session manager (structural option; sdk/ never imports session/).
+      getSessionScope: args.getSessionScope,
       getEnableThinking: () => Boolean(getSettings().agentMode?.backends?.claude?.enableThinking),
       getEnvOverrides: () =>
         sanitizeBuiltinSkillEnvOverrides(getSettings().agentMode?.backends?.claude?.envOverrides),

@@ -8,6 +8,7 @@ import { getVaultBase } from "@/utils/vaultPath";
 import { openVaultPath } from "@/utils/openVaultPath";
 import { useApp } from "@/context";
 import { AgentActivityCard } from "@/components/chat-components/AgentActivityCard";
+import { AgentSourceList } from "@/agentMode/ui/AgentSourceList";
 
 interface ActionCardProps {
   part: ToolCallPart;
@@ -27,7 +28,8 @@ export const ActionCard: React.FC<ActionCardProps> = ({ part, open, onToggle }) 
   const outcome = summary.outcome(part);
   const outputs = part.output ?? [];
   const details = summary.expandedDetails?.(part) ?? null;
-  const expandable = outputs.length > 0 || details !== null;
+  const sourceReferences = part.sourceReferences ?? [];
+  const expandable = outputs.length > 0 || details !== null || sourceReferences.length > 0;
   // Only expose a clickable target once the call has completed — opening a
   // half-written file mid-Edit would race with the tool, and an in-progress
   // Read has nothing to show yet.
@@ -69,6 +71,9 @@ export const ActionCard: React.FC<ActionCardProps> = ({ part, open, onToggle }) 
         </pre>
       ) : null}
       {outcome ? <div className="tw-text-xs tw-text-muted">{outcome}</div> : null}
+      {sourceReferences.length > 0 ? (
+        <AgentSourceList app={app} sources={sourceReferences} />
+      ) : null}
       {outputs.map((o, i) =>
         o.type === "text" ? (
           <pre

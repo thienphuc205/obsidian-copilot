@@ -1,8 +1,5 @@
-import { useChainType } from "@/aiParams";
-import { useSettingsValue } from "@/settings/model";
-import { isPlusChain } from "@/utils";
 import { Notice } from "obsidian";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import ChatInput, { type ChatInputHandle, type ChatInputProps } from "./ChatInput";
 import { ChatToolControls } from "./ChatToolControls";
 
@@ -12,31 +9,18 @@ type ChatModeInputProps = Omit<
 >;
 
 /**
- * Chat-mode wrapper around `ChatInput` that owns the autonomous-agent and
- * vault/web/composer toggle row, the `@vault` / `@websearch` / `@composer`
- * keyword injection at send time, and the pill ↔ toggle synchronization.
+ * Chat-mode wrapper around `ChatInput` that owns the vault/web/composer toggle
+ * row, the `@vault` / `@websearch` / `@composer` keyword injection at send
+ * time, and the pill ↔ toggle synchronization.
  *
  * Agent Mode renders `ChatInput` directly so none of this logic leaks into it.
  */
 const ChatModeInput: React.FC<ChatModeInputProps> = (props) => {
   const { handleSendMessage, inputMessage } = props;
-  const [currentChain] = useChainType();
-  const settings = useSettingsValue();
-  const isCopilotPlus = isPlusChain(currentChain);
 
   const [vaultToggle, setVaultToggle] = useState(false);
   const [webToggle, setWebToggle] = useState(false);
   const [composerToggle, setComposerToggle] = useState(false);
-  const [autonomousAgentToggle, setAutonomousAgentToggle] = useState(
-    settings.enableAutonomousAgent
-  );
-
-  // Mirror the persisted setting into the local toggle.
-  useEffect(() => {
-    /* eslint-disable @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- mirror the persisted setting into the local toggle; the toggle is also user-editable so it can't be pure derived state */
-    setAutonomousAgentToggle(settings.enableAutonomousAgent);
-    /* eslint-enable @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- resume checking after the persisted-state synchronization */
-  }, [settings.enableAutonomousAgent]);
 
   const chatInputRef = useRef<ChatInputHandle>(null);
 
@@ -52,29 +36,21 @@ const ChatModeInput: React.FC<ChatModeInputProps> = (props) => {
     chatInputRef.current?.removeToolPills(["@composer"]);
   }, []);
 
-  const handleToolPillsChange = useCallback(
-    (toolNames: string[]) => {
-      if (autonomousAgentToggle) return;
-      setVaultToggle(toolNames.includes("@vault"));
-      setWebToggle(toolNames.includes("@websearch") || toolNames.includes("@web"));
-      setComposerToggle(toolNames.includes("@composer"));
-    },
-    [autonomousAgentToggle]
-  );
+  const handleToolPillsChange = useCallback((toolNames: string[]) => {
+    setVaultToggle(toolNames.includes("@vault"));
+    setWebToggle(toolNames.includes("@websearch") || toolNames.includes("@web"));
+    setComposerToggle(toolNames.includes("@composer"));
+  }, []);
 
   const handleTagSelected = useCallback(() => {
-    if (isCopilotPlus && !autonomousAgentToggle && !vaultToggle) {
+    if (!vaultToggle) {
       setVaultToggle(true);
       new Notice("Vault search enabled for tag query");
     }
-  }, [isCopilotPlus, autonomousAgentToggle, vaultToggle]);
+  }, [vaultToggle]);
 
   const wrappedHandleSendMessage: ChatInputProps["handleSendMessage"] = useCallback(
     (metadata: Parameters<ChatInputProps["handleSendMessage"]>[0]) => {
-      if (!isCopilotPlus || autonomousAgentToggle) {
-        handleSendMessage(metadata);
-        return;
-      }
       const messageLower = inputMessage.toLowerCase();
       const toolCalls: string[] = [];
       if (vaultToggle && !messageLower.includes("@vault")) {
@@ -92,15 +68,7 @@ const ChatModeInput: React.FC<ChatModeInputProps> = (props) => {
       }
       handleSendMessage({ ...metadata, toolCalls });
     },
-    [
-      handleSendMessage,
-      inputMessage,
-      isCopilotPlus,
-      autonomousAgentToggle,
-      vaultToggle,
-      webToggle,
-      composerToggle,
-    ]
+    [handleSendMessage, inputMessage, vaultToggle, webToggle, composerToggle]
   );
 
   const toolControls = useMemo(
@@ -112,9 +80,6 @@ const ChatModeInput: React.FC<ChatModeInputProps> = (props) => {
         setWebToggle={setWebToggle}
         composerToggle={composerToggle}
         setComposerToggle={setComposerToggle}
-        autonomousAgentToggle={autonomousAgentToggle}
-        setAutonomousAgentToggle={setAutonomousAgentToggle}
-        currentChain={currentChain}
         onVaultToggleOff={handleVaultToggleOff}
         onWebToggleOff={handleWebToggleOff}
         onComposerToggleOff={handleComposerToggleOff}
@@ -124,8 +89,6 @@ const ChatModeInput: React.FC<ChatModeInputProps> = (props) => {
       vaultToggle,
       webToggle,
       composerToggle,
-      autonomousAgentToggle,
-      currentChain,
       handleVaultToggleOff,
       handleWebToggleOff,
       handleComposerToggleOff,

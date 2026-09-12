@@ -2,6 +2,7 @@ import { AI_SENDER, USER_SENDER, WEB_SELECTED_TEXT_TAG } from "@/constants";
 import { logInfo, logWarn } from "@/logger";
 import { AgentMessageStore } from "@/agentMode/session/AgentMessageStore";
 import { GLOBAL_SCOPE, type ProjectScopeId } from "@/agentMode/session/scope";
+import type { AgentScope } from "@/agentMode/session/agentScope";
 import {
   AgentChatMessage,
   AgentMessagePart,
@@ -41,7 +42,6 @@ import {
   MessageContext,
 } from "@/types/message";
 import { err2String, formatDateTime } from "@/utils";
-import { ensureMultiAgentEntitlement, showMultiAgentUpgradePrompt } from "@/plusUtils";
 import type { App } from "obsidian";
 import { MethodUnsupportedError } from "@/agentMode/session/errors";
 import { deriveChatTitleFromMessages } from "@/agentMode/session/chatHistoryMerge";
@@ -50,6 +50,12 @@ import type { ContextMaterializationResult } from "@/context/projectContextMater
 import { escapeXml } from "@/LLMProviders/chainRunner/utils/xmlParsing";
 import type { FanoutRunInput } from "@/agentMode/session/fanout/FanoutOrchestrator";
 import { isFanout } from "@/agentMode/session/fanout/answerers";
+import {
+  createSessionLocalAttachmentStaging,
+  SessionLocalAttachmentStagingError,
+  type AgentSessionLocalAttachmentStagingOptions,
+  type SessionLocalAttachmentStaging,
+} from "@/agentMode/session/sessionLocalAttachments";
 import {
   buildConversationHistoryBlock,
   buildPriorFanoutContextBlock,
@@ -61,6 +67,7 @@ import {
   type PendingFanoutContext,
 } from "@/agentMode/session/fanout/fanoutTypes";
 import { v4 as uuidv4 } from "uuid";
+import { extractAgentWebSourceReferences } from "@/agentMode/session/agentWebSources";
 
 /**
  * Seam the session calls to dispatch a multi-agent read-only QA turn. Supplied
@@ -256,11 +263,17 @@ export interface AgentSessionStartOptions extends ProjectContextUpdatesHooks {
    */
   getDisplayName?: (backendId: BackendId) => string;
   /**
-   * Resolve the Obsidian `App` for send-boundary side effects (the entitlement
-   * re-check passes it to `validateLicenseKey`). Threaded via DI so the session
-   * never reaches for the global `app`. Manager-supplied; tests omit it.
+   * Resolve the Obsidian `App` for send-boundary side effects. Threaded via DI
+   * so the session never reaches for the global `app`. Manager-supplied; tests
+   * omit it.
    */
   getApp?: () => App;
+  /**
+   * Optional vault-selection sandbox scope known at open time (see
+   * {@link OpenSessionInput.scope}). The manager updates it once the first
+   * user message carries an explicit selection; absent means vault-wide.
+   */
+  scope?: AgentScope;
   /**
    * Resolves to the project's context-materialization result. Supplied by the
    * manager and awaited in `initialize` right BEFORE `newSession`, so the
@@ -332,6 +345,11 @@ export class AgentSession {
   // `newSession` (null for context-free / resumed sessions, which open without
   // delay).
   private readonly contextReady: Promise<ContextMaterializationResult> | null;
+  // Vault-selection sandbox for this session (see `AgentSessionStartOptions
+  // .scope`). Null = vault-wide default. Updated by the manager when the first
+  // user message carries an explicit selection; per-turn consumers read it via
+  // `getAgentScope`.
+  private agentScope: AgentScope | null = null;
   // The project's `<project_context>` block, captured from `contextReady` in
   // `initialize`. Inlined into the FIRST user prompt only (see `runTurn` /
   // `buildPromptBlocks`); null for GLOBAL / context-free / resumed sessions.
@@ -460,6 +478,10 @@ export class AgentSession {
   // not tied to any turn placeholder.
   private currentUsage: SessionUsage | null = null;
 
+  // Volatile attachment metadata is bound to this session and never crosses
+  // into the backend, history, prompt, or persisted attachment store.
+  private localAttachmentStaging: SessionLocalAttachmentStaging | null = null;
+
   /**
    * Latest account-level plan-cap snapshot. Unlike {@link currentUsage} this is not a
    * property of the session — the caps keep counting elsewhere — so it is live-only and
@@ -498,6 +520,9 @@ export class AgentSession {
     this.getApp = opts.getApp ?? null;
     this.getProjectContextUpdatesFn = opts.getProjectContextUpdates ?? null;
     this.markProjectContextUpdatesDeliveredFn = opts.markProjectContextUpdatesDelivered ?? null;
+    // Only the start path (newSession) opens with a captured sandbox scope;
+    // adopted/resumed sessions bound to existing backend sessions keep null.
+    if ("contextReady" in opts) this.agentScope = opts.scope ?? null;
     // Only the start path (newSession) awaits context roots; adopted/resumed
     // sessions had theirs forwarded by the manager's resume/load call already.
     this.contextReady = "contextReady" in opts ? (opts.contextReady ?? null) : null;
@@ -546,6 +571,61 @@ export class AgentSession {
     return this.backendSessionId;
   }
 
+  /**
+   * This session's vault-selection sandbox, or `null` when none applies
+   * (vault-wide default). Per-session truth: the manager records the scope the
+   * session's first user message carried here, so per-turn consumers (e.g. the
+   * SDK permission gate) always see the latest selection without a reopen.
+   */
+  getAgentScope(): AgentScope | null {
+    return this.agentScope;
+  }
+
+  /** Record (or clear) this session's sandbox scope. Manager-owned update. */
+  setAgentScope(scope: AgentScope | null): void {
+    this.agentScope = scope;
+  }
+
+  /**
+   * Return the one volatile attachment staging bucket for this session.
+   * Repeated host calls refresh only the live authority callback; the
+   * session/project/vault binding and already staged references stay fixed.
+   *
+   * @param options The current vault identity and trusted live host lookup.
+   * @returns The session-local inert staging surface.
+   */
+  getLocalAttachmentStaging(
+    options: AgentSessionLocalAttachmentStagingOptions
+  ): SessionLocalAttachmentStaging {
+    if (this.disposed) {
+      throw new SessionLocalAttachmentStagingError(
+        "disposed",
+        "Cannot access attachment staging after session disposal"
+      );
+    }
+
+    if (this.localAttachmentStaging === null) {
+      this.localAttachmentStaging = createSessionLocalAttachmentStaging({
+        target: {
+          sessionId: this.internalId,
+          projectId: this.projectId,
+          vaultId: options.vaultId,
+        },
+        getLiveTarget: options.getLiveTarget,
+      });
+      return this.localAttachmentStaging;
+    }
+
+    if (this.localAttachmentStaging.getSnapshot().target.vaultId !== options.vaultId) {
+      throw new SessionLocalAttachmentStagingError(
+        "stale-target",
+        "A session-local attachment bucket cannot be rebound to another vault"
+      );
+    }
+    this.localAttachmentStaging.updateLiveTargetGetter(options.getLiveTarget);
+    return this.localAttachmentStaging;
+  }
+
   private async initialize(opts: AgentSessionStartOptions): Promise<void> {
     const { backend, cwd, defaultModelSelection } = opts;
     try {
@@ -569,6 +649,8 @@ export class AgentSession {
         // Extra searchable roots from the project's materialized context. The
         // backend honors them only when it advertises the capability.
         additionalDirectories,
+        // Vault-selection sandbox known at open time (absent → vault-wide).
+        scope: this.agentScope ?? undefined,
       });
       if (this.disposed) return;
       const modelLog = resp.state.model
@@ -1055,13 +1137,6 @@ export class AgentSession {
         isFanout(this.lastMentionedAgents, this.backendId) &&
         placeholderId
       ) {
-        // Authoritative paywall: a fan-out turn is Plus-only, and the typeahead UI
-        // gate can be bypassed (pasting a pill), so re-check entitlement here at
-        // the session boundary. Paying users short-circuit; everyone else is hard-blocked.
-        if (!(await this.ensureMultiAgentEntitlement())) {
-          return this.blockFanoutForEntitlement(placeholderId, turnStartedAtMs);
-        }
-
         // Give every fan-out agent the PRIOR visible transcript as a read-only
         // `<conversation_history>` block so follow-ups ("the answer above") work.
         // "Prior" excludes this turn's own user message + placeholder. Null → unchanged prompt.
@@ -1219,33 +1294,6 @@ export class AgentSession {
   }
 
   /**
-   * Authoritative entitlement gate for the fan-out path, at the session send
-   * boundary so a UI bypass can't evade it. Delegates to the shared helper:
-   * paying users allow sync with no network call; otherwise it re-verifies
-   * against `/license`.
-   */
-  private ensureMultiAgentEntitlement(): Promise<boolean> {
-    return ensureMultiAgentEntitlement(this.getApp?.());
-  }
-
-  /**
-   * Clean up a paywall-blocked fan-out turn: surface the upgrade prompt and
-   * finalize the placeholder as an error so no dangling bubble remains.
-   */
-  private blockFanoutForEntitlement(placeholderId: string, turnStartedAtMs: number): StopReason {
-    showMultiAgentUpgradePrompt();
-    this.store.markMessageError(
-      placeholderId,
-      "Multi-agent QA is a Copilot Plus feature. Upgrade to mention more than one agent in a turn."
-    );
-    this.store.markTurnComplete(placeholderId, "refusal", Date.now() - turnStartedAtMs);
-    this.currentMessageIds = new Set();
-    if (this.placeholderId === placeholderId) this.placeholderId = null;
-    this.notifyMessages();
-    return "refusal";
-  }
-
-  /**
    * Dispatch a fan-out turn. Every ANSWERER runs the identical `promptBlocks` in
    * a parallel ephemeral read-only sub-session, answers stream into per-agent
    * slots of one live {@link FanoutTurn}, and the main agent fills the summary
@@ -1369,6 +1417,7 @@ export class AgentSession {
   /** Detach from the backend. Does not cancel — call `cancel()` first. */
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.localAttachmentStaging?.dispose();
     this.unregisterSessionHandler?.();
     this.unregisterSessionHandler = null;
     this.flushResolvers(this.pendingPlanResolvers);
@@ -2345,6 +2394,7 @@ function extractText(content: PromptContent): string {
 function toolCallToPart(
   call: ToolCallSnapshot & { sessionUpdate?: "tool_call" }
 ): AgentMessagePart {
+  const sourceReferences = extractAgentWebSourceReferences(call.mcpServer, call.content);
   return {
     kind: "tool_call",
     id: call.toolCallId,
@@ -2354,6 +2404,7 @@ function toolCallToPart(
     input: call.rawInput,
     output: extractToolCallOutputs(call.content),
     locations: call.locations?.map((l) => ({ path: l.path, line: l.line ?? undefined })),
+    ...(sourceReferences ? { sourceReferences } : {}),
     vendorToolName: call.vendorToolName,
     mcpServer: call.mcpServer,
     parentToolCallId: call.parentToolCallId,
@@ -2402,6 +2453,11 @@ function mergeToolCallUpdate(
           status: "pending",
         };
   if (base.kind !== "tool_call") return base;
+  const mcpServer = upd.mcpServer ?? base.mcpServer;
+  const sourceReferences =
+    upd.content !== undefined
+      ? extractAgentWebSourceReferences(mcpServer, upd.content)
+      : base.sourceReferences;
   return {
     ...base,
     title: upd.title ?? base.title,
@@ -2416,8 +2472,12 @@ function mergeToolCallUpdate(
       upd.locations !== undefined && upd.locations !== null
         ? upd.locations.map((l) => ({ path: l.path, line: l.line ?? undefined }))
         : base.locations,
+    ...(sourceReferences ? { sourceReferences } : {}),
+    ...(sourceReferences === undefined && upd.content !== undefined
+      ? { sourceReferences: undefined }
+      : {}),
     vendorToolName: upd.vendorToolName ?? base.vendorToolName,
-    mcpServer: upd.mcpServer ?? base.mcpServer,
+    mcpServer,
     parentToolCallId: upd.parentToolCallId ?? base.parentToolCallId,
     progress: upd.progress === undefined ? base.progress : { ...base.progress, ...upd.progress },
   };

@@ -23,7 +23,6 @@ import { updateSetting, useSettingsValue, validateCopilotFolder } from "@/settin
 import { DesktopOnlySettingsPanel } from "@/settings/v2/components/DesktopOnlySettingsPanel";
 import { CopilotFolderChangeNotice } from "@/settings/v2/components/CopilotFolderChangeNotice";
 import { LegacyChatPromptsNotice } from "@/settings/v2/components/LegacyChatPromptsNotice";
-import { PlusSettings } from "@/settings/v2/components/PlusSettings";
 import { VaultInstructionsSetting } from "@/settings/v2/components/VaultInstructionsSetting";
 import { formatDateTime } from "@/utils";
 import { isDesktopRuntime } from "@/utils/desktopRuntime";
@@ -216,8 +215,6 @@ export const BasicSettings: React.FC = () => {
 
   return (
     <div className="tw-space-y-4">
-      <PlusSettings />
-
       <AgentsSection />
 
       {/* General Section */}
@@ -299,6 +296,14 @@ export const BasicSettings: React.FC = () => {
             </Button>
           </div>
         </SettingItem>
+
+        <SettingItem
+          type="switch"
+          title="Strict @file/@folder context"
+          description="When enabled, explicit file and folder context is resolved only against the current vault inventory. Invalid or stale paths are omitted. This bounds context selection; it does not sandbox ACP shell, MCP, or remote-model capabilities."
+          checked={settings.strictContextScope}
+          onCheckedChange={(checked) => updateSetting("strictContextScope", checked)}
+        />
       </SettingSection>
 
       <SettingSection label="Custom instructions">

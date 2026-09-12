@@ -198,10 +198,122 @@ describe("AgentModelPreloader", () => {
     await preloader.preload("claude-sdk");
     expect(procHandle.shutdown).not.toHaveBeenCalled();
 
-    preloader.shutdown();
-    await waitFor(() => expect(procHandle.shutdown).toHaveBeenCalledTimes(1));
+    await preloader.shutdown();
+    expect(procHandle.shutdown).toHaveBeenCalledTimes(1);
     expect(preloader.takeWarm("claude-sdk")).toBeNull();
     expect(preloader.getCachedModelCatalog("claude-sdk")).toBeNull();
+  });
+
+  it("awaits delayed warm shutdown and shares one completion with repeated callers", async () => {
+    const { descriptor, procHandle } = buildDescriptor(() => makeMockProc());
+    const preloader = new AgentModelPreloader(buildApp(), buildPlugin(), () => descriptor);
+    await preloader.preload("claude-sdk");
+
+    let resolveShutdown!: () => void;
+    const delayedShutdown = new Promise<void>((resolve) => {
+      resolveShutdown = resolve;
+    });
+    procHandle.shutdown.mockImplementationOnce(() => delayedShutdown);
+
+    const first = preloader.shutdown();
+    const second = preloader.shutdown();
+    expect(second).toBe(first);
+    expect(procHandle.shutdown).toHaveBeenCalledTimes(1);
+
+    let settled = false;
+    void first.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    resolveShutdown();
+    await first;
+    expect(settled).toBe(true);
+    expect(preloader.shutdown()).toBe(first);
+    expect(preloader.takeWarm("claude-sdk")).toBeNull();
+    expect(preloader.getWarmProcs()).toEqual([]);
+  });
+
+  it("bounds a non-cooperating warm process stop", async () => {
+    const { descriptor, procHandle } = buildDescriptor(() => makeMockProc());
+    const preloader = new AgentModelPreloader(buildApp(), buildPlugin(), () => descriptor);
+    await preloader.preload("claude-sdk");
+    procHandle.shutdown.mockImplementationOnce(() => new Promise<void>(() => {}));
+
+    jest.useFakeTimers();
+    try {
+      const shutdownPromise = preloader.shutdown();
+
+      jest.advanceTimersByTime(5_000);
+      await shutdownPromise;
+
+      expect(procHandle.shutdown).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("stops a probe once and suppresses a late prefetch result after shutdown", async () => {
+    let resolvePrefetch!: (catalog: Record<string, never>) => void;
+    let prefetchResolved = false;
+    const pendingPrefetch = new Promise<Record<string, never>>((resolve) => {
+      resolvePrefetch = (catalog) => {
+        prefetchResolved = true;
+        resolve(catalog);
+      };
+    });
+    const { descriptor, procHandle } = buildDescriptor(() => makeMockProc());
+    const prefetchEffortCatalog = jest.fn(() => pendingPrefetch);
+    descriptor.getEnabledModelEntries = jest.fn(() => [
+      {
+        baseModelId: "claude-sonnet",
+        name: "Claude Sonnet",
+        provider: "anthropic",
+        credentialState: "ok",
+      },
+    ]);
+    descriptor.prefetchEffortCatalog = prefetchEffortCatalog;
+    const preloader = new AgentModelPreloader(buildApp(), buildPlugin(), () => descriptor);
+
+    const preloadPromise = preloader.preload("claude-sdk");
+    await waitFor(() => expect(prefetchEffortCatalog).toHaveBeenCalledTimes(1));
+
+    const shutdownPromise = preloader.shutdown();
+    expect(prefetchResolved).toBe(false);
+    expect(preloader.takeWarm("claude-sdk")).toBeNull();
+    expect(preloader.getWarmProcs()).toEqual([]);
+    await shutdownPromise;
+    expect(procHandle.shutdown).toHaveBeenCalledTimes(1);
+
+    // Resolve only after shutdown has completed: teardown must not depend on
+    // the non-cooperating prefetch, and the late result must not be adopted.
+    resolvePrefetch({});
+    await preloadPromise;
+    expect(procHandle.shutdown).toHaveBeenCalledTimes(1);
+    expect(preloader.takeWarm("claude-sdk")).toBeNull();
+    expect(preloader.getCachedModelCatalog("claude-sdk")).toBeNull();
+    expect(preloader.getEffortCatalog("claude-sdk")).toBeNull();
+  });
+
+  it("stops a probe whose startup never settles without awaiting the probe", async () => {
+    const { descriptor, procHandle } = buildDescriptor(() => makeMockProc());
+    const neverSettlingStart = new Promise<void>(() => {});
+    procHandle.start.mockImplementationOnce(() => neverSettlingStart);
+    const preloader = new AgentModelPreloader(buildApp(), buildPlugin(), () => descriptor);
+
+    void preloader.preload("claude-sdk");
+    await waitFor(() => expect(procHandle.start).toHaveBeenCalledTimes(1));
+
+    await preloader.shutdown();
+    expect(procHandle.shutdown).toHaveBeenCalledTimes(1);
+    expect(preloader.takeWarm("claude-sdk")).toBeNull();
+    expect(preloader.getWarmProcs()).toEqual([]);
+    expect(descriptor.createBackendProcess).toHaveBeenCalledTimes(1);
+    await expect(preloader.preload("claude-sdk")).resolves.toBeUndefined();
+    expect(descriptor.createBackendProcess).toHaveBeenCalledTimes(1);
+    // Deliberately leave startup unresolved: shutdown already completed and
+    // must not rely on a cooperative probe to finish this test.
   });
 
   it("drops the warm entry when the probe subprocess exits before adoption", async () => {

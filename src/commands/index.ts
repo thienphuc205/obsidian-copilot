@@ -17,8 +17,6 @@ import {
 } from "@/commands/quickCommandPrompts";
 import { CustomCommandChatModal } from "@/commands/CustomCommandChatModal";
 import { ApplyCustomCommandModal } from "@/components/modals/ApplyCustomCommandModal";
-import { YoutubeTranscriptModal } from "@/components/modals/YoutubeTranscriptModal";
-import { checkIsPaidUser } from "@/plusUtils";
 import type CopilotPlugin from "@/main";
 import { MiyoRequestError } from "@/miyo/MiyoClient";
 import { requestMiyoIndexRefresh } from "@/miyo/miyoIndex";
@@ -27,13 +25,14 @@ import { getAllQAMarkdownContent } from "@/search/searchUtils";
 import { getSettings } from "@/settings/model";
 import { NoteSelectedTextContext, WebSelectedTextContext } from "@/types/message";
 import { isSourceModeOn } from "@/utils";
+import { Editor, MarkdownView, Notice } from "obsidian";
 import { isDesktopRuntime } from "@/utils/desktopRuntime";
-import { Editor, MarkdownView, Notice, TFile } from "obsidian";
 import { v4 as uuidv4 } from "uuid";
 import { COMMAND_IDS, COMMAND_ICONS, COMMAND_NAMES, CommandId } from "@/constants";
 import { setSelectedTextContexts } from "@/aiParams";
-
-type PublishFile = (file: TFile) => void;
+import { registerLocalImageCommands } from "@/commands/localImageCommands";
+import { registerResearchCommands } from "@/commands/researchCommands";
+import { registerDescribeImageCommands } from "@/commands/describeImageCommands";
 
 /**
  * Add a command to the plugin. Supports async callbacks; errors are logged.
@@ -89,19 +88,7 @@ function addCheckCommand(
   });
 }
 
-export function registerCommands(plugin: CopilotPlugin, publish: PublishFile) {
-  addCheckCommand(plugin, COMMAND_IDS.PUBLISH_FILE_TO_OPENARTIFACTS, (checking) => {
-    const activeFile = plugin.app.workspace.getActiveFile();
-    if (!(activeFile instanceof TFile) || activeFile.extension !== "md") {
-      return false;
-    }
-
-    if (!checking) {
-      publish(activeFile);
-    }
-    return true;
-  });
-
+export function registerCommands(plugin: CopilotPlugin) {
   addEditorCommand(plugin, COMMAND_IDS.COUNT_WORD_AND_TOKENS_SELECTION, async (editor: Editor) => {
     const selectedText = editor.getSelection();
     const wordCount = selectedText.split(" ").length;
@@ -155,6 +142,10 @@ export function registerCommands(plugin: CopilotPlugin, publish: PublishFile) {
       void plugin.newAgentChat();
     });
   }
+
+  registerLocalImageCommands(plugin);
+  registerResearchCommands(plugin);
+  registerDescribeImageCommands(plugin);
 
   // Quick Command - opens a modal dialog for quick interactions
   // Note: For inline floating panel experience, use Quick Ask instead
@@ -414,18 +405,6 @@ export function registerCommands(plugin: CopilotPlugin, publish: PublishFile) {
   // Add command to apply a custom command
   addCommand(plugin, COMMAND_IDS.APPLY_CUSTOM_COMMAND, () => {
     const modal = new ApplyCustomCommandModal(plugin.app);
-    modal.open();
-  });
-
-  // Add command to download YouTube script (Copilot Plus only)
-  addCommand(plugin, COMMAND_IDS.DOWNLOAD_YOUTUBE_SCRIPT, async () => {
-    const isPaidUser = await checkIsPaidUser(plugin.app, { trigger: "tool_call" });
-    if (!isPaidUser) {
-      new Notice("Download YouTube Script (plus) is a Copilot Plus feature");
-      return;
-    }
-
-    const modal = new YoutubeTranscriptModal(plugin.app);
     modal.open();
   });
 

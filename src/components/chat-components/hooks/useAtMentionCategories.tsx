@@ -94,15 +94,12 @@ const CATEGORY_OPTIONS: CategoryOption[] = [
 
 /**
  * Pure helper that decides whether the Copilot built-in `@`-tool surfaces
- * (Tools category and tool hits in search) should be visible. Tools require
- * Copilot Plus AND are suppressed entirely in Agent Mode, which routes
- * through its own backend instead of the Copilot tool runner.
+ * (Tools category and tool hits in search) should be visible. They are
+ * suppressed entirely in Agent Mode, which routes through its own backend
+ * instead of the Copilot tool runner.
  */
-export function shouldShowAtMentionTools(args: {
-  isCopilotPlus: boolean;
-  isAgentMode: boolean;
-}): boolean {
-  return args.isCopilotPlus && !args.isAgentMode;
+export function shouldShowAtMentionTools(args: { isAgentMode: boolean }): boolean {
+  return !args.isAgentMode;
 }
 
 /**
@@ -111,7 +108,7 @@ export function shouldShowAtMentionTools(args: {
  *
  * @param showTools - Whether to include the Copilot Tools category. Compute
  *   via {@link shouldShowAtMentionTools} from the caller's higher-level
- *   signals (e.g. Copilot Plus on, Agent Mode off).
+ *   signals (e.g. Agent Mode off).
  * @param showAgents - Whether to include the Agents category (Agent Mode with
  *   at least one installed backend). Rendered first when present.
  * @returns Array of CategoryOption objects

@@ -61,6 +61,7 @@ import { createClaudeTaskPlanState, type ClaudeTaskPlanState } from "./claudeTod
 import { ClaudeBackgroundTaskStateMachine } from "./claudeTaskProtocol";
 import { createTranslatorState, mapStopReason, translateSdkMessage } from "./sdkMessageTranslator";
 import { PermissionBridge, type AskUserQuestionPrompter } from "./permissionBridge";
+import { getVaultBase } from "@/utils/vaultPath";
 import {
   getCachedSdkCatalog,
   probeClaudeSdkCatalog,
@@ -180,6 +181,22 @@ export interface ClaudeSdkBackendProcessOptions {
    * prompter like any other tool.
    */
   isPlanModePlanFilePath?: (absolutePath: string) => boolean;
+  /**
+   * Reads the selected-context sandbox for a session (`agentScopeMode:
+   * "selected-context"`). When it returns a scope, the permission bridge
+   * denies `Write`/`Edit`/`NotebookEdit` calls whose target resolves outside
+   * the selected files/folders. Read per `prompt()` so a settings/scope
+   * change applies on the next turn; `undefined` / null / mode-off leaves the
+   * bridge ungated.
+   */
+  getSessionScope?: (sessionId: SessionId) =>
+    | {
+        vaultRelativeFiles?: Iterable<string>;
+        vaultRelativeFolders?: ReadonlySet<string>;
+        absoluteFolders?: ReadonlySet<string>;
+      }
+    | null
+    | undefined;
   /**
    * Returns the user's persisted model preference. Read at session start
    * to seed `session.model` from the live catalog (so the SDK uses what
@@ -407,6 +424,18 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
       getAskUserQuestionPrompter: () => this.askUserQuestionPrompter,
       isPlanModePlanFilePath: this.opts.isPlanModePlanFilePath,
       getIsReadOnlySession: () => this.isReadOnlySession,
+      // Selected-context sandbox. Write/Edit are listed in `allowedTools`
+      // below (auto-allowed by the SDK) but the SDK still consults
+      // `canUseTool` for every tool call, so this bridge alone enforces the
+      // scope deny — no PreToolUse hook is needed for these tools. Re-read
+      // per turn so a scope/mode change applies on the next `query()`.
+      getScopeSandbox: this.opts.getSessionScope
+        ? () => {
+            const scope = this.opts.getSessionScope?.(params.sessionId);
+            if (!scope) return null;
+            return { ...scope, vaultRoot: getVaultBase(this.opts.app) ?? undefined };
+          }
+        : undefined,
     });
 
     const options: Options = {
@@ -473,6 +502,9 @@ export class ClaudeSdkBackendProcess implements BackendProcess {
 
     // Each prompt currently owns one finite SDK query. Keep work foregrounded
     // until a persistent consumer can receive results after that query returns.
+    // The scope sandbox deliberately adds NO PreToolUse hook here: every
+    // auto-allowed tool (`allowedTools` above) still routes through
+    // `canUseTool`, so the permission bridge alone enforces the scope deny.
     options.hooks = { PreToolUse: [{ hooks: [enforceForegroundToolUse] }] };
 
     logSdkOutbound(

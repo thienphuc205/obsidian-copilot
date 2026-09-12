@@ -1,4 +1,5 @@
 import { AI_SENDER, USER_SENDER } from "@/constants";
+import { CHAT_ATTACHMENT_REF_SCHEMA_VERSION } from "./chatAttachmentRefs";
 import { AgentMessagePart } from "@/agentMode/session/types";
 import { serializeFanoutComposite, type FanoutTurn } from "@/agentMode/session/fanout/fanoutTypes";
 import { formatDateTime } from "@/utils";
@@ -409,6 +410,78 @@ describe("AgentMessageStore", () => {
     });
 
     describe("loadMessages()", () => {
+      it("normalizes attachment references through add, load, and display adaptation", () => {
+        const refs = [
+          {
+            schemaVersion: CHAT_ATTACHMENT_REF_SCHEMA_VERSION,
+            vaultId: "vault-a",
+            attachmentId: "att-1",
+          },
+          {
+            schemaVersion: CHAT_ATTACHMENT_REF_SCHEMA_VERSION,
+            vaultId: "vault-a",
+            attachmentId: "att-1",
+          },
+          {
+            schemaVersion: CHAT_ATTACHMENT_REF_SCHEMA_VERSION,
+            vaultId: "vault-b",
+            attachmentId: "att-2",
+          },
+        ];
+        const store = new AgentMessageStore();
+        const id = store.addMessage({
+          message: "with attachment metadata",
+          sender: USER_SENDER,
+          timestamp: null,
+          isVisible: true,
+          localAttachmentRefs: refs,
+          content: [{ type: "image", data: "data:image/png;base64,raw" }],
+        });
+
+        expect(store.getMessage(id)?.localAttachmentRefs).toEqual([refs[0], refs[2]]);
+        expect(store.getMessage(id)?.content).toEqual([
+          { type: "image", data: "data:image/png;base64,raw" },
+        ]);
+
+        store.loadMessages([
+          {
+            id: "loaded",
+            sender: USER_SENDER,
+            message: "restored",
+            timestamp: null,
+            isVisible: true,
+            localAttachmentRefs: refs,
+          },
+        ]);
+        expect(store.getDisplayMessages()[0].localAttachmentRefs).toEqual([refs[0], refs[2]]);
+      });
+
+      it("preserves restored display-only source references", () => {
+        const sourceReferences = [
+          {
+            title: "Docs",
+            path: "https://example.com/docs",
+            score: 0,
+            kind: "web" as const,
+            url: "https://example.com/docs",
+          },
+        ];
+        const store = new AgentMessageStore();
+
+        store.loadMessages([
+          {
+            id: "a1",
+            sender: AI_SENDER,
+            message: "restored answer",
+            timestamp: null,
+            isVisible: true,
+            sourceReferences,
+          },
+        ]);
+
+        expect(store.getDisplayMessages()[0].sourceReferences).toBe(sourceReferences);
+      });
+
       it("keeps a message that has no send time undated instead of stamping the load time", () => {
         // A replayed ACP transcript carries no times, and a saved chat can hold
         // "Unknown time". Stamping now would date every restored message to the

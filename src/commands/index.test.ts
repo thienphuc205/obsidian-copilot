@@ -1,11 +1,11 @@
 import { registerCommands } from "@/commands";
-import { COMMAND_ICONS, COMMAND_IDS, COMMAND_NAMES } from "@/constants";
+import { COMMAND_IDS, COMMAND_NAMES } from "@/constants";
 import type CopilotPlugin from "@/main";
 import { MiyoRequestError } from "@/miyo/MiyoClient";
 import { getSettings } from "@/settings/model";
 import { isDesktopRuntime } from "@/utils/desktopRuntime";
 import { waitFor } from "@testing-library/react";
-import { Notice, TFile, type Command } from "obsidian";
+import { Notice, type Command } from "obsidian";
 
 const mockRequestMiyoIndexRefresh = jest.fn();
 
@@ -41,11 +41,6 @@ jest.mock("@/miyo/MiyoClient", () => {
   };
 });
 
-function markdownFile(path: string): TFile {
-  const TFileConstructor = TFile as unknown as new (path: string) => TFile;
-  return new TFileConstructor(path);
-}
-
 describe("commands", () => {
   describe("registerCommands()", () => {
     beforeEach(() => {
@@ -64,62 +59,11 @@ describe("commands", () => {
         app: { workspace: { getActiveFile: jest.fn(() => null) } },
       } as unknown as CopilotPlugin;
 
-      registerCommands(plugin, jest.fn());
+      registerCommands(plugin);
 
       const command = commands.find(({ id }) => id === COMMAND_IDS.NEW_CHAT);
       expect(command?.name).toBe("New Copilot Quick Chat");
       expect(command?.name).not.toBe(COMMAND_NAMES[COMMAND_IDS.NEW_AGENT_CHAT]);
-    });
-
-    it("registers the OpenArtifacts palette command and publishes the active Markdown file", () => {
-      const activeFile = markdownFile("Notes/Active.md");
-      const commands: Command[] = [];
-      const plugin = {
-        addCommand: jest.fn((command: Command) => commands.push(command)),
-        app: {
-          workspace: {
-            getActiveFile: jest.fn(() => activeFile),
-          },
-        },
-      } as unknown as CopilotPlugin;
-      const publish = jest.fn().mockResolvedValue(undefined);
-
-      registerCommands(plugin, publish);
-
-      const command = commands.find(({ id }) => id === COMMAND_IDS.PUBLISH_FILE_TO_OPENARTIFACTS);
-      expect(COMMAND_IDS.PUBLISH_FILE_TO_OPENARTIFACTS).toBe("publish-file-to-symposium");
-      expect(command).toMatchObject({
-        name: COMMAND_NAMES[COMMAND_IDS.PUBLISH_FILE_TO_OPENARTIFACTS],
-        icon: COMMAND_ICONS[COMMAND_IDS.PUBLISH_FILE_TO_OPENARTIFACTS],
-      });
-      expect(command?.checkCallback?.(true)).toBe(true);
-      expect(publish).not.toHaveBeenCalled();
-
-      expect(command?.checkCallback?.(false)).toBe(true);
-      expect(publish).toHaveBeenCalledWith(activeFile);
-    });
-
-    it.each([
-      ["no active file", null],
-      ["a non-Markdown active file", markdownFile("Notes/Diagram.canvas")],
-    ])("hides the OpenArtifacts palette command for %s", (_case, activeFile) => {
-      const commands: Command[] = [];
-      const plugin = {
-        addCommand: jest.fn((command: Command) => commands.push(command)),
-        app: {
-          workspace: {
-            getActiveFile: jest.fn(() => activeFile),
-          },
-        },
-      } as unknown as CopilotPlugin;
-      const publish = jest.fn().mockResolvedValue(undefined);
-
-      registerCommands(plugin, publish);
-
-      const command = commands.find(({ id }) => id === COMMAND_IDS.PUBLISH_FILE_TO_OPENARTIFACTS);
-      expect(command?.checkCallback?.(true)).toBe(false);
-      expect(command?.checkCallback?.(false)).toBe(false);
-      expect(publish).not.toHaveBeenCalled();
     });
 
     it("registers no index command when Miyo is disabled (https://github.com/Brevilabs/obsidian-copilot-private/issues/282)", () => {
@@ -129,7 +73,7 @@ describe("commands", () => {
         app: { workspace: { getActiveFile: jest.fn(() => null) } },
       } as unknown as CopilotPlugin;
 
-      registerCommands(plugin, jest.fn());
+      registerCommands(plugin);
 
       expect(commands.filter(({ id }) => id.includes("index"))).toEqual([]);
     });
@@ -138,7 +82,6 @@ describe("commands", () => {
       jest.mocked(getSettings).mockReturnValue({
         enableMiyo: true,
         miyoServerUrl: "http://miyo.local",
-        plusLicenseKey: "license",
       } as ReturnType<typeof getSettings>);
       const commands: Command[] = [];
       const plugin = {
@@ -146,7 +89,7 @@ describe("commands", () => {
         app: { workspace: { getActiveFile: jest.fn(() => null) } },
       } as unknown as CopilotPlugin;
 
-      registerCommands(plugin, jest.fn());
+      registerCommands(plugin);
       const indexCommands = commands.filter(({ id }) => id.includes("index"));
       expect(indexCommands).toHaveLength(1);
       expect(indexCommands[0]).toMatchObject({
@@ -176,7 +119,7 @@ describe("commands", () => {
         app: { workspace: { getActiveFile: jest.fn(() => null) } },
       } as unknown as CopilotPlugin;
 
-      registerCommands(plugin, jest.fn());
+      registerCommands(plugin);
       commands.find(({ id }) => id === COMMAND_IDS.REFRESH_MIYO_INDEX)?.callback?.();
 
       await waitFor(() =>
@@ -196,7 +139,7 @@ describe("commands", () => {
         app: { workspace: { getActiveFile: jest.fn(() => null) } },
       } as unknown as CopilotPlugin;
 
-      registerCommands(plugin, jest.fn());
+      registerCommands(plugin);
       jest.mocked(getSettings).mockReturnValue({
         enableMiyo: false,
         miyoServerUrl: "http://miyo.local",
@@ -231,7 +174,7 @@ describe("commands", () => {
           app: { workspace: { getActiveFile: jest.fn(() => null) } },
         } as unknown as CopilotPlugin;
 
-        registerCommands(plugin, jest.fn());
+        registerCommands(plugin);
         commands.find(({ id }) => id === COMMAND_IDS.REFRESH_MIYO_INDEX)?.callback?.();
 
         await waitFor(() => expect(Notice).toHaveBeenCalledWith(expectedNotice));

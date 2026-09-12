@@ -345,7 +345,7 @@ export const MiyoSettings: React.FC = () => {
             .filter((folder) => folder.length > 0 && folder !== "." && folder !== "..")
         ),
       ];
-      await new MiyoClient({ plusLicenseKey: currentSettings.plusLicenseKey }).addFolder(
+      await new MiyoClient().addFolder(
         {
           path: vaultBase,
           exclude_folders: initialExclusions,
@@ -687,14 +687,12 @@ export const MiyoSettings: React.FC = () => {
 
       {/* Powered by Miyo — the capability block. Partial gating: the Miyo pickers /
           status dim when disconnected, but the Document Processor output path stays
-          editable (it applies to Plus document conversion too), so this can't use
-          SettingSection's all-or-nothing `gated`. */}
+          editable, so this can't use SettingSection's all-or-nothing `gated`. */}
       <div className="tw-space-y-2">
         <div className="tw-text-xs tw-font-semibold tw-text-muted">Powered by Miyo</div>
         <div className="tw-text-sm tw-text-muted">
-          <span className="tw-font-semibold tw-text-normal">Plus</span> = Copilot cloud, uses
-          credits · <span className="tw-font-semibold tw-text-accent">Miyo</span> = local,
-          unlimited, on your machine
+          <span className="tw-font-semibold tw-text-accent">Miyo</span> = local, unlimited, on your
+          machine
         </div>
 
         <MiyoAvailabilityNotice
@@ -801,24 +799,21 @@ export const MiyoSettings: React.FC = () => {
               />
             </div>
 
-            {/* Document Processor — NOT connection-gated: it's a Plus-vs-Miyo
-                choice, not a Miyo-only capability, so it stays selectable even
-                when Miyo is unavailable. That lets a user switch back to Plus to
-                recover from a fail-closed parse error (resolveDocProcessorBackend
-                surfaces "reconnect Miyo or switch to Plus"). The persisted field
-                is honored at the parse boundary; the picker only sets the
-                preference. */}
+            {/* Document Processor — NOT connection-gated: the output folder applies
+                to conversions regardless of Miyo's health, so it stays editable
+                even when Miyo is unavailable. The persisted field is honored at
+                the parse boundary; the picker only sets the preference. The
+                field's legacy "plus" member is no longer offered: this fork has
+                no hosted relay, so only Miyo is selectable until the settings
+                migration retires the value. */}
             <div className="tw-px-4">
               <CapabilityRow
                 title="Document Processor"
-                description="Processes PDF & EPUB locally via Miyo; other formats use Plus cloud."
+                description="Processes PDF & EPUB locally via Miyo."
                 control={
                   <SegmentedControl
                     aria-label="Document Processor backend"
-                    options={[
-                      { label: "Plus", value: "plus" },
-                      { label: "Miyo", value: "miyo" },
-                    ]}
+                    options={[{ label: "Miyo", value: "miyo" }]}
                     value={settings.docProcessorBackend}
                     onChange={(value) => updateSetting("docProcessorBackend", value)}
                   />

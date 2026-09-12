@@ -1,4 +1,6 @@
 import { logInfo } from "@/logger";
+import type { SourceReference } from "@/context/sourceReferences";
+import { normalizeLocalAttachmentRefs, type LocalAttachmentRef } from "./chatAttachmentRefs";
 import {
   parseFanoutComposite,
   snapshotFanoutTurn,
@@ -35,6 +37,8 @@ interface StoredAgentMessage {
   parts?: AgentMessagePart[];
   context?: MessageContext;
   content?: unknown[];
+  localAttachmentRefs?: readonly LocalAttachmentRef[];
+  sourceReferences?: readonly SourceReference[];
   turnStopReason?: StopReason;
   turnDurationMs?: number;
   // Live per-agent fan-out state. In-memory only; the persisted body carries the
@@ -95,6 +99,7 @@ function partsEqual(a: AgentMessagePart, b: AgentMessagePart): boolean {
         toolProgressEqual(a.progress, b.progress) &&
         boundedValueEqual(a.input, b.input) &&
         locationsEqual(a.locations, b.locations) &&
+        sourceReferencesEqual(a.sourceReferences, b.sourceReferences) &&
         toolOutputsEqual(a.output, b.output)
       );
   }
@@ -152,6 +157,24 @@ function locationsEqual(
   if (!a || !b) return a === b;
   if (a.length !== b.length) return false;
   return a.every((loc, index) => loc.path === b[index].path && loc.line === b[index].line);
+}
+
+/** Compare source metadata without making every stream tick stringify it. */
+function sourceReferencesEqual(
+  a: Extract<AgentMessagePart, { kind: "tool_call" }>["sourceReferences"],
+  b: Extract<AgentMessagePart, { kind: "tool_call" }>["sourceReferences"]
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return a === b;
+  if (a.length !== b.length) return false;
+  return a.every(
+    (source, index) =>
+      source.title === b[index].title &&
+      source.path === b[index].path &&
+      source.url === b[index].url &&
+      source.snippet === b[index].snippet &&
+      source.publishedAt === b[index].publishedAt
+  );
 }
 
 /** Compare rendered tool outputs with bounded string work. */
@@ -266,6 +289,9 @@ export class AgentMessageStore {
   addMessage(message: NewAgentChatMessage): string {
     const id = message.id || this.generateId();
     const timestamp = message.timestamp || formatDateTime(new Date());
+    const localAttachmentRefs = this.normalizeOptionalLocalAttachmentRefs(
+      message.localAttachmentRefs
+    );
     this.messages.push({
       id,
       displayText: message.message,
@@ -275,6 +301,8 @@ export class AgentMessageStore {
       isVisible: message.isVisible !== false,
       isErrorMessage: message.isErrorMessage,
       content: message.content,
+      ...(localAttachmentRefs ? { localAttachmentRefs } : {}),
+      sourceReferences: message.sourceReferences,
       parts: message.parts,
       turnStopReason: message.turnStopReason,
       turnDurationMs: message.turnDurationMs,
@@ -561,6 +589,9 @@ export class AgentMessageStore {
       // kept as-is — only the live `fanout` view is rebuilt.
       const fanout =
         msg.sender === USER_SENDER ? undefined : (parseFanoutComposite(msg.message) ?? undefined);
+      const localAttachmentRefs = this.normalizeOptionalLocalAttachmentRefs(
+        msg.localAttachmentRefs
+      );
       this.messages.push({
         id: msg.id || this.generateId(),
         displayText: msg.message,
@@ -574,6 +605,8 @@ export class AgentMessageStore {
         isVisible: msg.isVisible !== false,
         isErrorMessage: msg.isErrorMessage,
         content: msg.content,
+        ...(localAttachmentRefs ? { localAttachmentRefs } : {}),
+        sourceReferences: msg.sourceReferences,
         parts: msg.parts,
         turnStopReason: msg.turnStopReason,
         turnDurationMs: msg.turnDurationMs,
@@ -602,11 +635,20 @@ export class AgentMessageStore {
       isErrorMessage: m.isErrorMessage,
       content: m.content,
       parts: m.parts,
+      sourceReferences: m.sourceReferences,
       turnStopReason: m.turnStopReason,
       turnDurationMs: m.turnDurationMs,
+      ...(m.localAttachmentRefs ? { localAttachmentRefs: m.localAttachmentRefs } : {}),
       // Snapshot so each adapted view carries a fresh reference; the orchestrator
       // mutates one turn in place, so the same reference would freeze the dropdown.
       ...(m.fanout ? { fanout: snapshotFanoutTurn(m.fanout) } : {}),
     };
+  }
+
+  private normalizeOptionalLocalAttachmentRefs(
+    value: unknown
+  ): readonly LocalAttachmentRef[] | undefined {
+    const refs = normalizeLocalAttachmentRefs(value);
+    return refs.length > 0 ? refs : undefined;
   }
 }

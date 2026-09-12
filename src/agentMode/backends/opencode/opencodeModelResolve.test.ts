@@ -1,10 +1,6 @@
 import type { CopilotSettings } from "@/settings/model";
 import type { ConfiguredModel, Provider, ProviderOrigin, ProviderType } from "@/modelManagement";
-import { ChatModelProviders } from "@/constants";
 import {
-  COPILOT_PLUS_OPENCODE_PROVIDER_ID,
-  copilotPlusModelId,
-  isOpencodeZenWireId,
   mapProviderToOpencodeId,
   opencodeEnabledModelEntries,
   opencodeWireBaseIdFor,
@@ -83,27 +79,12 @@ describe("opencodeModelResolve", () => {
       expect(mapProviderToOpencodeId(makeProvider("p1", { kind: "byok" }, "google"))).toBeNull();
     });
 
-    it("maps copilot-plus origin to the reserved copilot-plus id, non-native", () => {
-      const provider = makeProvider("p1", { kind: "copilot-plus" });
-      expect(mapProviderToOpencodeId(provider)).toEqual({ id: "copilot-plus", native: false });
-    });
-
     it("maps an agent-origin provider to its providerId, native", () => {
       const provider = makeProvider("opencode-provider", { kind: "agent", agentType: "opencode" });
       expect(mapProviderToOpencodeId(provider)).toEqual({
         id: "opencode-provider",
         native: true,
       });
-    });
-  });
-
-  describe("isOpencodeZenWireId", () => {
-    it("matches the opencode/ prefix only", () => {
-      expect(isOpencodeZenWireId("opencode/big-pickle")).toBe(true);
-      expect(isOpencodeZenWireId("opencode/deepseek-v4-flash-free")).toBe(true);
-      expect(isOpencodeZenWireId("lmstudio/gpt-oss-20b")).toBe(false);
-      expect(isOpencodeZenWireId("openrouter/anthropic/claude")).toBe(false);
-      expect(isOpencodeZenWireId("opencode-zen/x")).toBe(false); // prefix must be exactly `opencode/`
     });
   });
 
@@ -221,15 +202,20 @@ describe("opencodeModelResolve", () => {
       expect(first).toBe(second);
     });
 
-    it("builds the `<provider>/<model>` wire base id for copilot-plus models", () => {
+    it("builds the `<provider>/<model>` wire base id for openai-compatible BYOK models", () => {
       const settings = makeSettings({
         enabledModels: ["cm1"],
-        providers: { p1: makeProvider("p1", { kind: "copilot-plus" }) },
-        configuredModels: [makeModel("cm1", "p1", "copilot-plus-flash")],
+        providers: {
+          p1: makeProvider(
+            "p1",
+            { kind: "byok" },
+            "openai-compatible",
+            "http://localhost:11434/v1"
+          ),
+        },
+        configuredModels: [makeModel("cm1", "p1", "qwen3")],
       });
-      expect(opencodeEnabledModelEntries(settings)[0].baseModelId).toBe(
-        "copilot-plus/copilot-plus-flash"
-      );
+      expect(opencodeEnabledModelEntries(settings)[0].baseModelId).toBe("p1/qwen3");
     });
 
     it("skips models whose provider row is missing", () => {
@@ -260,51 +246,41 @@ describe("opencodeModelResolve", () => {
     });
   });
 
-  describe("COPILOT_PLUS_OPENCODE_PROVIDER_ID", () => {
-    it("equals the Copilot provider id host code builds wire ids from", () => {
-      // `plusUtils.isUsingLicensedModels` reconstructs the prefixed wire id from
-      // `ChatModelProviders.COPILOT_PLUS`, because this module sits behind the
-      // desktop-only Agent Mode barrel. Drift would silently stop it matching.
-      expect(COPILOT_PLUS_OPENCODE_PROVIDER_ID).toBe(ChatModelProviders.COPILOT_PLUS);
-    });
-  });
-
-  describe("copilotPlusModelId", () => {
-    it("strips opencode's Copilot Plus prefix down to the bare model id", () => {
-      expect(copilotPlusModelId("copilot-plus/gemini-3-pro")).toBe("gemini-3-pro");
-    });
-
-    it.each([
-      ["a BYOK model on the user's own key", "google/gemini-3-pro"],
-      ["an agent-hosted model", "opencode/grok-code"],
-      ["a bare id with no provider prefix", "gemini-3-pro"],
-      ["null", null],
-      ["undefined", undefined],
-    ])("answers null for %s — Copilot Plus caps must not apply to it", (_label, wireId) => {
-      expect(copilotPlusModelId(wireId)).toBeNull();
-    });
-  });
-
   describe("opencodeWireBaseIdFor", () => {
-    const plusProvider = makeProvider("plus-1", { kind: "copilot-plus" }, "openai-compatible");
+    const customProvider = makeProvider(
+      "custom-1",
+      { kind: "byok" },
+      "openai-compatible",
+      "http://localhost:11434/v1"
+    );
 
-    it("prefixes a Copilot model with the provider opencode routes it under", () => {
+    it("prefixes an openai-compatible BYOK model with the provider opencode routes it under", () => {
       const settings = makeSettings({
-        providers: { "plus-1": plusProvider },
-        configuredModels: [makeModel("cm1", "plus-1", "copilot-plus-flash")],
+        providers: { "custom-1": customProvider },
+        configuredModels: [makeModel("cm1", "custom-1", "qwen3")],
       });
-      expect(opencodeWireBaseIdFor("cm1", settings)).toBe("copilot-plus/copilot-plus-flash");
+      expect(opencodeWireBaseIdFor("cm1", settings)).toBe("custom-1/qwen3");
     });
 
     it("answers for a configured model that no backend has enabled yet", () => {
-      // No `backends.opencode` slice at all: provider sync configures a model
+      // No `backends.opencode` slice at all: provider setup configures a model
       // before enrolling it, and the id must be available in between.
       const settings = makeSettings({
-        providers: { "plus-1": plusProvider },
-        configuredModels: [makeModel("cm1", "plus-1", "copilot-plus-flash")],
+        providers: { "custom-1": customProvider },
+        configuredModels: [makeModel("cm1", "custom-1", "qwen3")],
       });
       expect(settings.backends.opencode).toBeUndefined();
-      expect(opencodeWireBaseIdFor("cm1", settings)).toBe("copilot-plus/copilot-plus-flash");
+      expect(opencodeWireBaseIdFor("cm1", settings)).toBe("custom-1/qwen3");
+    });
+
+    it("prefixes a catalog BYOK model with its catalog provider id", () => {
+      const settings = makeSettings({
+        providers: {
+          p1: makeProvider("p1", { kind: "byok", catalogProviderId: "anthropic" }),
+        },
+        configuredModels: [makeModel("cm1", "p1", "claude-sonnet-4-5")],
+      });
+      expect(opencodeWireBaseIdFor("cm1", settings)).toBe("anthropic/claude-sonnet-4-5");
     });
 
     it("leaves an agent-hosted model's own id unprefixed", () => {
@@ -325,7 +301,7 @@ describe("opencodeModelResolve", () => {
 
       const orphaned = makeSettings({
         providers: {},
-        configuredModels: [makeModel("cm1", "gone", "copilot-plus-flash")],
+        configuredModels: [makeModel("cm1", "gone", "some-model")],
       });
       expect(opencodeWireBaseIdFor("cm1", orphaned)).toBeNull();
     });

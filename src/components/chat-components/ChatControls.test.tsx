@@ -9,10 +9,6 @@ import React from "react";
 jest.mock("@/aiParams", () => ({
   useChainType: () => ["llm_chain", jest.fn()],
 }));
-jest.mock("@/plusUtils", () => ({
-  navigateToPlusPage: jest.fn(),
-  useIsPaidUser: () => true,
-}));
 jest.mock("@/settings/model", () => ({
   updateSetting: jest.fn(),
   useSettingsValue: () => ({ autoAcceptEdits: false, autosaveChat: true }),

@@ -140,19 +140,6 @@ export interface BackendDescriptor {
   readonly selfHostable: boolean;
 
   /**
-   * Whether this backend can run the Copilot-hosted models. `true` for backends
-   * that route Copilot's provider (opencode); `false` for agents that bring
-   * their own models from their own subscription (Claude Code, Codex).
-   *
-   * Read when no license is active, to decide whose section previews the locked
-   * Copilot lineup — which is why it cannot be derived from the configured
-   * models: without a license there is no Copilot provider to inspect.
-   *
-   * Required (not optional) so a new backend must make an explicit decision.
-   */
-  readonly routesCopilotModels: boolean;
-
-  /**
    * One-paragraph pitch shown beside this backend in the agent select view:
    * which models the user gets from it, and whose plan pays for them. That
    * trade-off is the only thing separating the agents from a user's point of
@@ -288,6 +275,10 @@ export interface BackendDescriptor {
     app: App;
     clientVersion: string;
     descriptor: BackendDescriptor;
+    /** Per-backend-session vault-selection sandbox (Claude SDK permission bridge). */
+    getSessionScope?: (
+      backendSessionId: import("./types").SessionId
+    ) => import("./agentScope").AgentScope | null;
   }): BackendProcess;
 
   /** Optional: backend-specific settings panel. Rendered inside the Agent Mode tab. */
@@ -417,10 +408,10 @@ export interface BackendDescriptor {
    * Optional: this backend's wire base id for one configured model, or `null`
    * when it cannot route that model's provider at all. Answers "can you run
    * this, and under what id?" from the provider alone, deliberately ignoring
-   * whether the model is enabled — enrollment is a separate, later write (see
-   * `CopilotPlusSetupApi.#reconcileModels`), so a caller acting the moment a
-   * model is configured must not have to race it. Only backends that route
-   * Copilot-side providers implement this; agent-native ones (claude, codex)
+   * whether the model is enabled — enrollment is a separate, later write
+   * (`AgentSetupApi` reconcile), so a caller acting the moment a model is
+   * configured must not have to race it. Only backends that route
+   * user-managed providers implement this; agent-native ones (claude, codex)
    * omit it, which reads as "not mine".
    */
   getWireBaseId?(configuredModelId: string, settings: CopilotSettings): string | null;

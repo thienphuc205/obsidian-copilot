@@ -6,8 +6,9 @@ import { providerNeedsResolvedApiKey } from "@/modelManagement";
 import { isCatalogProviderDefaultEndpoint } from "@/utils/providerBaseUrl";
 import type { BackendConfigRegistry, ProviderRegistry } from "@/modelManagement";
 import { AcpBackend, AcpSpawnDescriptor } from "@/agentMode/acp/types";
-import { EFFORT_LEVELS_ASCENDING } from "@/agentMode/session/types";
 import type { CopilotMode } from "@/agentMode/session/types";
+import type { AgentScope } from "@/agentMode/session/agentScope";
+import { getActiveAgentScope } from "@/agentMode/session/agentScope";
 import { composeDenyList, getManagedSkills, SkillManager } from "@/agentMode/skills";
 import { buildAgentSystemPrompt } from "@/agentMode/backends/shared/agentSystemPrompt";
 import {
@@ -15,9 +16,7 @@ import {
   sanitizeBuiltinSkillEnvOverrides,
 } from "@/agentMode/backends/shared/builtinSkillEnv";
 import { OpencodeBackendDescriptor } from "./descriptor";
-import { copilotPlusModelId, mapProviderToOpencodeId } from "./opencodeModelResolve";
-import type { PlanUsageReading } from "@/agentMode/session/planUsage";
-import { CopilotPlusUsageReader } from "@/agentMode/backends/shared/copilotPlusUsage";
+import { mapProviderToOpencodeId } from "./opencodeModelResolve";
 import type { SelfHostWebSearchAgentChannel } from "@/LLMProviders/selfHostServices";
 
 /**
@@ -34,7 +33,6 @@ export const OPENCODE_PROVIDER_MAP: Partial<Record<ChatModelProviders, string>> 
   [ChatModelProviders.DEEPSEEK]: "deepseek",
   [ChatModelProviders.OPENROUTERAI]: "openrouter",
   [ChatModelProviders.XAI]: "xai",
-  [ChatModelProviders.COPILOT_PLUS]: "copilot-plus",
 };
 
 /**
@@ -75,13 +73,6 @@ export interface OpencodeModelDeps {
   getCacheRoot?: () => string | undefined;
   /** Starts or reuses the owning plugin lifecycle's provider-credential-free channel. */
   getSelfHostWebSearchChannel?: () => Promise<Readonly<SelfHostWebSearchAgentChannel>>;
-  /**
-   * Resolves the thinking-effort levels the Copilot Plus service publishes for a bare
-   * Plus model id, or null when they cannot be read. Injected so the config builder
-   * never reaches for the catalog itself. When omitted, no model gets a declared level
-   * set and opencode falls back to inferring one, which is the behavior this replaces.
-   */
-  getReasoningEfforts?: (modelId: string) => Promise<readonly string[] | null>;
 }
 
 /**
@@ -95,34 +86,8 @@ export class OpencodeBackend implements AcpBackend {
 
   readonly #deps: OpencodeModelDeps;
 
-  /**
-   * Copilot Plus caps and model windows. Held per backend instance so its catalog cache
-   * dies with the process that owns it, and shared with any other backend serving the
-   * same hosted models.
-   */
-  readonly #copilotPlus = new CopilotPlusUsageReader();
-
   constructor(deps: OpencodeModelDeps) {
     this.#deps = deps;
-  }
-
-  /** Copilot Plus account caps, read from the models host that enforces them. */
-  async readPlanUsage(): Promise<PlanUsageReading> {
-    return this.#copilotPlus.readPlanUsage();
-  }
-
-  /**
-   * Selection is the whole test: only a session on a `copilot-plus/` model is metered
-   * by these caps. A user on their own key reaches this backend too, and must see no
-   * cap meters (https://github.com/logancyang/obsidian-copilot-preview/issues/193).
-   */
-  planUsageAppliesTo(wireModelId: string | null | undefined): boolean {
-    return copilotPlusModelId(wireModelId) !== null;
-  }
-
-  /** Copilot Plus models carry no window on the wire; the published catalog has it. */
-  async readContextWindow(wireModelId: string | null | undefined): Promise<number | null> {
-    return this.#copilotPlus.readContextWindow(copilotPlusModelId(wireModelId));
   }
 
   async buildSpawnDescriptor(ctx: {
@@ -154,54 +119,56 @@ export class OpencodeBackend implements AcpBackend {
     );
     const configOverride = envOverrides.OPENCODE_CONFIG_CONTENT;
     delete envOverrides.OPENCODE_CONFIG_CONTENT;
-    // Resolve the override before building anything: it replaces the generated config
-    // wholesale, so building one spends a Copilot Plus catalog read on JSON that is then
-    // thrown away — and an unreachable models host makes that read wait out its deadline
-    // before every spawn. https://github.com/logancyang/obsidian-copilot/issues/2917
-    let configContent =
-      configOverride ??
-      JSON.stringify(
-        await buildOpencodeConfig(
-          settings,
-          {
-            ...this.#deps,
-            getReasoningEfforts: (modelId) => this.#copilotPlus.readReasoningEfforts(modelId),
-          },
-          cacheRoot
-        )
-      );
-    if (settings.enableSelfHostMode === true && configOverride !== undefined) {
-      // An explicit config override must not reopen agent-native web tools while
-      // Self-Host mode promises that queries stay on the configured route.
-      // https://github.com/Brevilabs/obsidian-copilot-private/issues/165
-      let overriddenConfig: Record<string, unknown>;
-      try {
-        const parsed = JSON.parse(configOverride) as unknown;
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
-        overriddenConfig = parsed as Record<string, unknown>;
-      } catch {
-        throw new Error("opencode OPENCODE_CONFIG_CONTENT must be a JSON object.");
-      }
-      overriddenConfig.permission = denyNativeWebTools(overriddenConfig.permission);
-      const overriddenAgents = overriddenConfig.agent;
-      if (
-        overriddenAgents &&
-        typeof overriddenAgents === "object" &&
-        !Array.isArray(overriddenAgents)
-      ) {
-        for (const agent of Object.values(overriddenAgents)) {
-          if (!agent || typeof agent !== "object" || Array.isArray(agent)) continue;
-          const agentConfig = agent as Record<string, unknown>;
-          agentConfig.permission = denyNativeWebTools(agentConfig.permission);
+    // Resolve the override before building anything: it replaces the generated
+    // config wholesale, so building one is wasted work.
+    const scope = getActiveAgentScope();
+    let configContent: string;
+    if (configOverride !== undefined) {
+      configContent = configOverride;
+      if (settings.enableSelfHostMode === true || scope) {
+        let overriddenConfig: Record<string, unknown>;
+        try {
+          const parsed = JSON.parse(configOverride) as unknown;
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+          overriddenConfig = parsed as Record<string, unknown>;
+        } catch {
+          throw new Error("opencode OPENCODE_CONFIG_CONTENT must be a JSON object.");
         }
+        if (settings.enableSelfHostMode === true) {
+          // An explicit config override must not reopen agent-native web tools while
+          // Self-Host mode promises that queries stay on the configured route.
+          // https://github.com/Brevilabs/obsidian-copilot-private/issues/165
+          overriddenConfig.permission = denyNativeWebTools(overriddenConfig.permission);
+          const overriddenAgents = overriddenConfig.agent;
+          if (
+            overriddenAgents &&
+            typeof overriddenAgents === "object" &&
+            !Array.isArray(overriddenAgents)
+          ) {
+            for (const agent of Object.values(overriddenAgents)) {
+              if (!agent || typeof agent !== "object" || Array.isArray(agent)) continue;
+              const agentConfig = agent as Record<string, unknown>;
+              agentConfig.permission = denyNativeWebTools(agentConfig.permission);
+            }
+          }
+        }
+        // The vault-selection sandbox must survive a wholesale user config
+        // replacement the same way the Self-Host seal does: re-apply the
+        // additive scope permissions the generated config would have carried.
+        if (scope) applyAgentScopePermissions(overriddenConfig, cacheRoot);
+        configContent = JSON.stringify(overriddenConfig);
       }
-      configContent = JSON.stringify(overriddenConfig);
+    } else {
+      configContent = JSON.stringify(
+        await buildOpencodeConfig(settings, this.#deps, cacheRoot, scope)
+      );
     }
     // Accepted degradation: a user `OPENCODE_CONFIG_CONTENT` override replaces
     // the whole generated config, dropping the allow rule.
     // opencode then prompts on every snapshot read; the sources still appear in
-    // the manifest. Warn so the lost approval-suppression is diagnosable.
-    if (cacheRoot && configOverride !== undefined) {
+    // the manifest. Warn so the lost approval-suppression is diagnosable —
+    // unless the vault-selection sandbox re-applied it above.
+    if (cacheRoot && configOverride !== undefined && !scope) {
       logWarn(
         "[AgentMode] opencode envOverrides.OPENCODE_CONFIG_CONTENT replaces the generated config; " +
           "the context-cache external_directory allow rule is dropped — opencode will prompt on every " +
@@ -255,49 +222,74 @@ function normalizeCacheRoot(raw: string | undefined): string | undefined {
 }
 
 /**
+ * Normalize an OpenCode permission policy to its object form. Shorthand
+ * strings become the wildcard record, invalid shapes collapse to empty.
+ */
+function normalizeOpencodePermission(permission: unknown): Record<string, unknown> {
+  return typeof permission === "string"
+    ? { "*": permission }
+    : permission && typeof permission === "object" && !Array.isArray(permission)
+      ? (permission as Record<string, unknown>)
+      : {};
+}
+
+/**
  * Preserve an OpenCode permission policy while making native web access non-overridable.
  * https://github.com/Brevilabs/obsidian-copilot-private/issues/165
  *
  * @param permission Existing shorthand or object permission policy.
  */
 function denyNativeWebTools(permission: unknown): Record<string, unknown> {
-  const permissionRecord =
-    typeof permission === "string"
-      ? { "*": permission }
-      : permission && typeof permission === "object" && !Array.isArray(permission)
-        ? (permission as Record<string, unknown>)
-        : {};
-  return { ...permissionRecord, websearch: "deny", webfetch: "deny" };
+  return { ...normalizeOpencodePermission(permission), websearch: "deny", webfetch: "deny" };
+}
+
+// copilotScope marker — the vault-selection sandbox fallback below. NOTE
+// (version-sensitive, pinned opencode 1.18.16): `edit`/`write`/`bash` accept a
+// per-tool policy value ("allow"/"ask"/"deny"); the ONLY permission key this
+// repo proves to take a path-scoped `{ "<glob>": rule }` record is
+// `external_directory`. No glob-scoped write rule is emitted: inventing one
+// against the pinned version would silently no-op (or worse, be ignored) and
+// imply a confinement that does not exist. Until the pinned version proves
+// path-scoped write rules, the sandbox confines via the session cwd (set by
+// the manager at session-open) plus this additive ask-gating of writes, and
+// the cache-root `external_directory` allow is preserved so scoped reads of
+// the off-vault conversions cache keep working.
+/**
+ * Additive vault-selection sandbox permissions: ask before writes and shell
+ * work on the top level (primary agents + subagents) and on every configured
+ * agent, while preserving the cache-root `external_directory` allow and any
+ * narrower rules already present.
+ */
+function applyAgentScopePermissions(
+  config: Record<string, unknown>,
+  cacheRoot: string | undefined
+): void {
+  const cacheAllow = cacheRoot ? { external_directory: { [`${cacheRoot}/**`]: "allow" } } : {};
+  const scopePermission = { ...cacheAllow, bash: "ask", edit: "ask" };
+  config.permission = { ...normalizeOpencodePermission(config.permission), ...scopePermission };
+  const agents = config.agent;
+  if (agents && typeof agents === "object" && !Array.isArray(agents)) {
+    for (const agent of Object.values(agents)) {
+      if (!agent || typeof agent !== "object" || Array.isArray(agent)) continue;
+      const agentConfig = agent as Record<string, unknown>;
+      agentConfig.permission = {
+        ...normalizeOpencodePermission(agentConfig.permission),
+        ...scopePermission,
+      };
+    }
+  }
 }
 
 /**
- * opencode `variants` declaring exactly the effort levels a model really has.
+ * Build the `OPENCODE_CONFIG_CONTENT` payload from the enabled opencode models.
+ * Each non-native (BYOK) provider is registered with its keychain key and its
+ * models; native (agent-origin) providers are skipped since opencode already
+ * hosts them. Model selection is applied to each session after `session/new`
+ * reports the backend's actual initial state.
  *
- * opencode builds an effort menu for any model it is told reasons, and with no catalog
- * entry for Copilot Plus it infers the levels from the model id — a fixed low/medium/high
- * plus whatever its per-model special cases add. The result is wrong in both directions:
- * it offers levels that are synonyms of each other and misses levels the model has.
- * Config variants merge over the inferred ones and any marked `disabled` are dropped, so
- * publishing the real set plus a disable for every other level replaces the guess
- * outright. https://github.com/logancyang/obsidian-copilot/issues/2917
- *
- * @param levels - The levels the service published for this model, ascending.
+ * Takes settings + registries as parameters (no singletons) so it stays
+ * unit-testable.
  */
-export function effortVariantsFor(
-  levels: readonly string[]
-): Record<string, Record<string, unknown>> {
-  const variants: Record<string, Record<string, unknown>> = {};
-  for (const level of levels) variants[level] = { reasoningEffort: level };
-  // Completeness is the whole contract here: a level missing from the canonical
-  // vocabulary cannot be disabled, so it survives into opencode's menu for a model the
-  // service never advertised it for, and picking a level the service rejects fails the
-  // turn with a raw error payload instead of answering.
-  // https://github.com/logancyang/obsidian-copilot/issues/2915
-  for (const level of EFFORT_LEVELS_ASCENDING) {
-    if (!variants[level]) variants[level] = { disabled: true };
-  }
-  return variants;
-}
 
 /** Mutable opencode provider config entry built into `OPENCODE_CONFIG_CONTENT`. */
 type ProviderConfig = {
@@ -307,20 +299,11 @@ type ProviderConfig = {
   models?: Record<string, Record<string, unknown>>;
 };
 
-/**
- * Build the `OPENCODE_CONFIG_CONTENT` payload from the enabled opencode models.
- * Each non-native (BYOK / Plus) provider is registered with its keychain key
- * and its models; native (agent-origin) providers are skipped since opencode
- * already hosts them. Model selection is applied to each session after
- * `session/new` reports the backend's actual initial state.
- *
- * Takes settings + registries as parameters (no singletons) so it stays
- * unit-testable.
- */
 export async function buildOpencodeConfig(
   s: CopilotSettings,
   deps: OpencodeModelDeps,
-  cacheRoot?: string
+  cacheRoot?: string,
+  agentScope?: AgentScope | null
 ): Promise<Record<string, unknown>> {
   const { providerRegistry, backendConfigRegistry } = deps;
 
@@ -338,9 +321,9 @@ export async function buildOpencodeConfig(
     // `catalogProviderId`) natively — it knows their npm SDK and default base
     // URL, so we hand it only the apiKey (plus a baseURL when the user
     // overrode one). Everything else reaching here — custom OpenAI-compatible
-    // endpoints (Ollama, LM Studio, proxies) and Copilot Plus — has no catalog
-    // identity and must be registered explicitly as `@ai-sdk/openai-compatible`
-    // pointed at its own baseURL.
+    // endpoints (Ollama, LM Studio, proxies) — has no catalog identity and
+    // must be registered explicitly as `@ai-sdk/openai-compatible` pointed at
+    // its own baseURL.
     const origin = entry.provider.origin;
     const catalogProviderId = origin.kind === "byok" ? origin.catalogProviderId : undefined;
     const hasCatalogIdentity = !!catalogProviderId;
@@ -389,9 +372,6 @@ export async function buildOpencodeConfig(
         options: {
           ...(apiKey ? { apiKey } : {}),
           ...(baseURL ? { baseURL } : {}),
-          ...(origin.kind === "copilot-plus" && deps.clientVersion
-            ? { headers: { "X-Client-Version": deps.clientVersion } }
-            : {}),
         },
       };
       provider[mapping.id] = providerConfig;
@@ -402,10 +382,10 @@ export async function buildOpencodeConfig(
     // model's capabilities as `injected ?? models.dev-catalog ?? default`, and
     // `unsupportedParts` strips image/file parts whenever `input.image` is
     // false. For catalog providers this stays in agreement with opencode's own
-    // catalog; for providers opencode has no catalog entry for (Copilot Plus,
-    // self-hosted OpenAI-compatible) the default is `false`, so a genuinely
-    // multimodal model would have its images silently stripped. Injecting the
-    // modalities we already know prevents that.
+    // catalog; for providers opencode has no catalog entry for (self-hosted
+    // OpenAI-compatible) the default is `false`, so a genuinely multimodal
+    // model would have its images silently stripped. Injecting the modalities
+    // we already know prevents that.
     const { info } = entry.configuredModel;
     const modelConfig: Record<string, unknown> = {};
     if (info.modalities) {
@@ -413,26 +393,13 @@ export async function buildOpencodeConfig(
       if (info.modalities.input?.includes("image")) modelConfig.attachment = true;
     }
     // Declare reasoning support so opencode offers a thought-level (effort) option
-    // for the model. opencode has no catalog entry for Copilot Plus / self-hosted
-    // OpenAI-compatible providers, so without this it defaults to non-reasoning and
-    // the effort picker shows "na". Mirrors the modalities injection above.
+    // for the model. opencode has no catalog entry for self-hosted
+    // OpenAI-compatible providers, so without this it defaults to non-reasoning
+    // and the effort picker shows "na". Mirrors the modalities injection above;
+    // the effort menu is opencode's own inference (no level list is published
+    // to us).
     if (info.reasoning) {
-      // Copilot Plus publishes the levels each of its models really has; a BYOK model
-      // has no such list and keeps opencode's own inference. Null means the catalog
-      // could not be read, which must not be mistaken for "no levels" — dropping a
-      // working control over a transient outage is worse than an imperfect menu.
-      // https://github.com/logancyang/obsidian-copilot/issues/2917
-      const published =
-        origin.kind === "copilot-plus"
-          ? ((await deps.getReasoningEfforts?.(info.id)) ?? null)
-          : null;
-      // A model that honors no level gets no control at all: opencode builds the menu
-      // only for models it is told reason, so leaving `reasoning` unset is how the
-      // menu disappears rather than showing entries that do nothing.
-      if (published === null || published.length > 0) {
-        modelConfig.reasoning = true;
-        if (published) modelConfig.variants = effortVariantsFor(published);
-      }
+      modelConfig.reasoning = true;
     }
     providerConfig.models[info.id] = modelConfig;
     injected.push(`${mapping.id}/${info.id}`);
@@ -465,11 +432,11 @@ export async function buildOpencodeConfig(
   //
   // Both agents also carry a Copilot-authored `prompt` that overrides
   // opencode's provider-default prompt picker (`session/system.ts`). Without
-  // this override, Copilot Plus model names (e.g. `copilot-plus-flash`) miss
-  // every substring branch and fall through to the generic `default.txt`
-  // CLI-coding-agent prompt — wrong domain for an Obsidian vault assistant.
-  // opencode's `cfg.agent.<id>` merge is field-wise, so adding `prompt` to
-  // the built-in `build` agent leaves its native permissions intact.
+  // this override, hosted model names miss every substring branch and fall
+  // through to the generic `default.txt` CLI-coding-agent prompt — wrong
+  // domain for an Obsidian vault assistant. opencode's `cfg.agent.<id>` merge
+  // is field-wise, so adding `prompt` to the built-in `build` agent leaves its
+  // native permissions intact.
   //
   // The prompt is the shared composed payload: the Copilot base framing (unless
   // the user disabled it), the pill-syntax directive, and the user's custom
@@ -559,6 +526,14 @@ export async function buildOpencodeConfig(
     logInfo(
       `[AgentMode] opencode deny list: ${denyNames.length} cross-discovered skill(s) denied (${denyNames.join(", ")})`
     );
+  }
+
+  // copilotScope — the vault-selection sandbox. Additive ask-gating plus the
+  // cache-root allow, on top of every policy above (Self-Host web denies and
+  // skill denies survive the merge). See the version-sensitivity note at
+  // `applyAgentScopePermissions` for why no path-scoped write rule is emitted.
+  if (agentScope) {
+    applyAgentScopePermissions(config, cacheRoot);
   }
 
   return config;

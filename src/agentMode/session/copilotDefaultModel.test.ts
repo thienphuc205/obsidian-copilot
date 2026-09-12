@@ -10,7 +10,6 @@ jest.mock("@/settings/model", () => ({
     mockSetSettings(updater),
 }));
 
-import { OpencodeBackendDescriptor } from "@/agentMode/backends/opencode/descriptor";
 import { seedCopilotDefaultModel } from "./copilotDefaultModel";
 
 const FLASH_ID = "cm-flash";
@@ -135,45 +134,6 @@ describe("copilotDefaultModel", () => {
       seedCopilotDefaultModel(descriptors, FLASH_ID);
 
       expect(mockSetSettings).toHaveBeenCalledTimes(1);
-    });
-
-    // The stubs above fix the join's contract; this pins the real wiring the
-    // registry entry point depends on. Note the absent `backends.opencode`
-    // slice: provider sync configures a model before enrolling it anywhere, so
-    // seeding must work from the model alone — an enrollment-based lookup would
-    // skip OpenCode for anyone who confirmed before sync finished.
-    it("seeds the real OpenCode descriptor from a model that is configured but not yet enrolled", () => {
-      const settings = {
-        configuredModels: [
-          {
-            configuredModelId: FLASH_ID,
-            providerId: "plus-1",
-            info: { id: "copilot-plus-flash", displayName: "Copilot Plus Flash" },
-            configuredAt: 0,
-          },
-        ],
-        providers: {
-          "plus-1": {
-            providerId: "plus-1",
-            providerType: "openai-compatible",
-            displayName: "Copilot",
-            origin: { kind: "copilot-plus" },
-            addedAt: 0,
-          },
-        },
-        agentMode: { backends: {} },
-        enableSelfHostMode: false,
-      } as unknown as CopilotSettings;
-      mockGetSettings.mockReturnValue(settings);
-
-      const seeded = seedCopilotDefaultModel([OpencodeBackendDescriptor], FLASH_ID);
-
-      expect(seeded).toEqual(["opencode"]);
-      expect(writtenBackends(settings)).toEqual({
-        opencode: {
-          defaultModel: { baseModelId: "copilot-plus/copilot-plus-flash", effort: null },
-        },
-      });
     });
   });
 });

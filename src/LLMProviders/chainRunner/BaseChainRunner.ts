@@ -2,7 +2,6 @@ import { ABORT_REASON, AI_SENDER } from "@/constants";
 import { logError, logInfo } from "@/logger";
 import { ChatMessage, ResponseMetadata } from "@/types/message";
 import { err2String, formatDateTime } from "@/utils";
-import { formatUsageCapError } from "@/utils/usageCapError";
 import ChainManager from "@/LLMProviders/chainManager";
 
 export interface ChainRunner {
@@ -151,24 +150,13 @@ export abstract class BaseChainRunner implements ChainRunner {
   protected async handleError(error: unknown, processErrorChunk: (message: string) => void) {
     const msg = err2String(error);
     logError("Error during LLM invocation:", msg);
-    // Usage-cap (plan limit) errors get the friendly purchase-credits message with
-    // the dashboard link — on the main streaming path too, not just the planning
-    // catch (which routes through getApiErrorMessage). This is the common cap path:
-    // the relay returns token_limit_error mid-invocation after planning succeeds.
-    const capMessage = formatUsageCapError(error);
-    if (capMessage) {
-      processErrorChunk(capMessage);
-      return;
-    }
     const errorData =
       (error as { response?: { data?: { error?: unknown } } })?.response?.data?.error || msg;
     const errorCode = (errorData as { code?: string })?.code || msg;
     let errorMessage = "";
 
     // Check for specific error messages
-    if ((error as { message?: string })?.message?.includes("Invalid license key")) {
-      errorMessage = "Invalid Copilot Plus license key. Please check your license key in settings.";
-    } else if (errorCode === "model_not_found") {
+    if (errorCode === "model_not_found") {
       errorMessage =
         "You do not have access to this model or the model does not exist, please check with your API provider.";
     } else {

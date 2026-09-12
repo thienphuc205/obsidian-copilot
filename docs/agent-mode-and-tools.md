@@ -75,6 +75,14 @@ When the plugin's managed version changes, Agent Chat and Settings show the same
 
 For Windows-specific installation help, see [Windows setup for Agent Chat](agent-mode-windows-setup.md).
 
+### Codex Agent web tools
+
+The optional **Codex Agent web tools** setting is available under [**Settings → Copilot → Basic → Agents**](settings.md#basic). It is wired to Codex Agent sessions only; opencode and Claude do not use this setting. It does not require Copilot Plus, but it does require your Codex setup and credentials for Firecrawl, Tavily, Exa, or your own normalized Custom API. Choose the provider in Settings; its search and page-fetch results share the same clickable source format. See [the setup and privacy details](settings.md#codex-agent-web-tools).
+
+The selected provider receives the queries and URLs used for web search and fetch, and an agent-generated query may contain vault data. Codex may also send prompt context and tool results to its configured remote model service. This setting does not create strict vault isolation or enforce `@file`/`@folder` scope. Local document handling is configured separately. Changing the enablement, provider, or key can restart Codex and interrupt an active turn; turn it off to roll back the capability.
+
+Completed web-tool citations remain clickable after you close and reopen a saved Agent Chat. The chat note stores only a bounded source list (title, public URL, optional short excerpt, and publication date); it does not store provider keys, tool inputs, full fetched pages, raw tool output, ranking details, or a new permission to read anything.
+
 ### Start a chat
 
 Select the **Agent Chat** ribbon icon or run **Open Copilot Agent Chat Window** from the command palette. If the default agent is not ready, Copilot opens **Select your agent**. Configure an agent, choose an installed row, then select **Start chat**.

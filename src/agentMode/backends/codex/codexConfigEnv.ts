@@ -30,17 +30,36 @@ function parseCodexConfig(value: string | undefined): Record<string, unknown> {
 }
 
 /**
+ * The vault-selection sandbox directive. Codex's pinned
+ * `sandbox_mode: "workspace-write"` already restricts writes to the session
+ * cwd, so this line only makes the boundary explicit to the model; the cwd it
+ * names is the session cwd the manager opens scoped sessions in.
+ */
+export function codexScopeInstructionLine(workspaceRoot: string): string {
+  return `Workspace-write is confined to ${workspaceRoot}; treat it as the only writable area for this session.`;
+}
+
+/**
  * Current codex-acp versions ignore server-mode argv and consume Codex config
  * from this JSON env var. User config can customize product defaults, while
  * plugin-owned fields win so inherited values cannot silently remove the
  * prompt and safety defaults Agent Mode requires.
+ *
+ * `options.workspaceRoot` appends the vault-selection confinement line to the
+ * developer instructions (after the shared prompt) when the session workspace
+ * is narrower than the vault root.
  */
 export function mergeCodexConfigEnv(
   existing: string | undefined,
-  developerInstructions: string
+  developerInstructions: string,
+  options?: { workspaceRoot?: string }
 ): string {
+  const instructions =
+    options?.workspaceRoot !== undefined
+      ? `${developerInstructions}\n${codexScopeInstructionLine(options.workspaceRoot)}`
+      : developerInstructions;
   const managed: CodexManagedConfig = {
-    developer_instructions: developerInstructions,
+    developer_instructions: instructions,
     approval_policy: "on-request",
     approvals_reviewer: "user",
     sandbox_mode: "workspace-write",

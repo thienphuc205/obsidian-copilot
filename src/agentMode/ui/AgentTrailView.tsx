@@ -14,6 +14,8 @@ import { SubAgentCard } from "@/agentMode/ui/SubAgentCard";
 import { ReasoningBlock } from "@/agentMode/ui/ReasoningBlock";
 import { AgentMarkdownText } from "@/agentMode/ui/AgentMarkdownText";
 import { planEntryClass, planEntryIcon } from "@/agentMode/ui/planEntryStyles";
+import type { ResearchProgress } from "@/agentMode/ui/researchProgress";
+import { ResearchProgressCard } from "@/agentMode/ui/ResearchProgressCard";
 import type { ToolSummaryContext } from "@/agentMode/ui/toolSummaries";
 import { useThinkingClock } from "@/agentMode/ui/useThinkingClock";
 import { useTrailExpansion, type TrailExpansion } from "@/agentMode/ui/useTrailExpansion";
@@ -38,6 +40,14 @@ interface AgentTrailProps {
   /** Backend stopReason once the turn has ended. Only `cancelled` suppresses
    *  the Copy / Insert affordances (treated as having no user-visible answer). */
   turnStopReason?: StopReason;
+  /**
+   * Research-run progress panel replacing the tool-call activity for research
+   * turns. Computed by the caller (which owns the classifying user message);
+   * null / absent keeps the plain trail.
+   */
+  researchProgress?: ResearchProgress | null;
+  /** Opens the research note the run wrote; threaded through to the panel. */
+  onOpenResearchNote?: (path: string) => void;
 }
 
 export const AgentTrail: React.FC<AgentTrailProps> = ({
@@ -48,6 +58,8 @@ export const AgentTrail: React.FC<AgentTrailProps> = ({
   timestamp,
   app,
   turnStopReason,
+  researchProgress,
+  onOpenResearchNote,
 }) => {
   // Copy / Insert act on the agent's full textual response. Gate them off while
   // the message is still streaming and on cancelled turns (treated as having no
@@ -74,7 +86,15 @@ export const AgentTrail: React.FC<AgentTrailProps> = ({
 
   return (
     <div className="tw-group tw-flex tw-flex-col tw-gap-1">
-      <LinearTrail parts={parts} isStreaming={isStreaming} app={app} />
+      {researchProgress ? (
+        <ResearchProgressCard progress={researchProgress} onOpenNote={onOpenResearchNote} />
+      ) : null}
+      <LinearTrail
+        parts={parts}
+        isStreaming={isStreaming}
+        app={app}
+        researchProgress={researchProgress}
+      />
       {hasRunningDuration ? (
         <AgentTurnDurationIndicator status="running" startedAtMs={turnStartedAtMs} />
       ) : null}
@@ -99,12 +119,20 @@ const LinearTrail: React.FC<{
   parts: AgentMessagePart[];
   isStreaming: boolean;
   app: App;
-}> = ({ parts, isStreaming, app }) => {
+  researchProgress?: ResearchProgress | null;
+}> = ({ parts, isStreaming, app, researchProgress }) => {
   const expansion = useTrailExpansion();
   // `vaultBase` is stable for the plugin lifetime, but memoizing keeps the
   // summary inputs referentially stable across re-renders.
   const summaryCtx = useMemo(() => ({ vaultBase: getVaultBase(app) }), [app]);
   const nodes = foldActivityGroups(buildAgentTrail(parts));
+  // A research run's tool activity is summarized by the progress panel above,
+  // so the raw call rows (and grouped/sub-agent runs of them) drop out here.
+  // Reasoning, prose, and plan parts stay — they carry the plan and the final
+  // answer, which the panel deliberately does not replace.
+  const shownNodes = researchProgress
+    ? nodes.filter((n) => n.type === "text" || n.type === "reasoning" || n.type === "plan")
+    : nodes;
   // A reasoning block is "still active" only while the turn is in flight AND
   // its `thought` part is the trailing entry of `msg.parts[]`. Anything later
   // (a tool_call, a sibling thought split by a tool_call, an `agent_message_chunk`)
@@ -121,8 +149,8 @@ const LinearTrail: React.FC<{
   };
   return (
     <div className="tw-flex tw-flex-col tw-gap-1">
-      {nodes.map((node, i) =>
-        renderNode(node, i, ctx, isStreaming && i === nodes.length - 1, "root")
+      {shownNodes.map((node, i) =>
+        renderNode(node, i, ctx, isStreaming && i === shownNodes.length - 1, "root")
       )}
     </div>
   );

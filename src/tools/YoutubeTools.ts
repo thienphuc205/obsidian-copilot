@@ -1,6 +1,5 @@
-import { BrevilabsClient } from "@/LLMProviders/brevilabsClient";
 import { selfHostYoutube4llm } from "@/LLMProviders/selfHostServices";
-import { isSelfHostModeValid } from "@/plusUtils";
+import { isSelfHostModeEnabled } from "@/LLMProviders/selfHostMode";
 import { getSettings } from "@/settings/model";
 import { extractAllYoutubeUrls } from "@/utils";
 import * as z from "zod";
@@ -42,6 +41,15 @@ const youtubeTranscriptionTool = createLangChainTool({
       };
     }
 
+    // Self-host only: transcription goes through the user's own Supadata API key.
+    if (!isSelfHostModeEnabled() || !getSettings().supadataApiKey) {
+      return {
+        success: false,
+        message:
+          "YouTube transcription requires Self-Host Mode enabled with a Supadata API key configured in settings",
+      };
+    }
+
     // Extract YouTube URLs only from the user's message
     const urls = extractAllYoutubeUrls(_userMessageContent);
 
@@ -57,10 +65,7 @@ const youtubeTranscriptionTool = createLangChainTool({
     const results = await Promise.all(
       urls.map(async (url) => {
         try {
-          const response =
-            isSelfHostModeValid() && getSettings().supadataApiKey
-              ? await selfHostYoutube4llm(url)
-              : await BrevilabsClient.getInstance().youtube4llm(url);
+          const response = await selfHostYoutube4llm(url);
 
           // Check if transcript is empty
           if (!response.response.transcript) {

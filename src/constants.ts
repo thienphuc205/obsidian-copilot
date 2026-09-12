@@ -175,14 +175,6 @@ export const LOADING_MESSAGES = {
   READING_FILE_TREE: "Reading file tree",
   COMPACTING: "Compacting",
 };
-export const PLUS_UTM_MEDIUMS = {
-  SETTINGS: "settings",
-  EXPIRED_MODAL: "expired_modal",
-  CHAT_MODE_SELECT: "chat_mode_select",
-  MODE_SELECT_TOOLTIP: "mode_select_tooltip",
-  MULTI_AGENT: "multi_agent",
-};
-export type PlusUtmMedium = (typeof PLUS_UTM_MEDIUMS)[keyof typeof PLUS_UTM_MEDIUMS];
 
 /**
  * Reasoning effort levels for OpenAI reasoning models
@@ -239,15 +231,6 @@ export const DEFAULT_MODEL_SETTING = {
 export const DEFAULT_OLLAMA_NUM_CTX = 131072;
 
 export enum ChatModels {
-  COPILOT_PLUS_FLASH = "copilot-plus-flash",
-  // Additional Copilot Plus relay models (served via the brevilabs proxy).
-  COPILOT_PLUS_KIMI_K2_6 = "kimi-k2.6",
-  COPILOT_PLUS_GLM_5_2 = "glm-5.2",
-  COPILOT_PLUS_KIMI_K2_7_CODE = "kimi-k2.7-code",
-  COPILOT_PLUS_DEEPSEEK_V4_PRO = "deepseek-v4-pro",
-  COPILOT_PLUS_DEEPSEEK_V4_FLASH_0731 = "deepseek-v4-flash-0731",
-  COPILOT_PLUS_MIMO_V2_5 = "mimo-v2.5",
-  COPILOT_PLUS_MINIMAX_M2_7 = "minimax-m2.7",
   GPT_5_5 = "gpt-5.5",
   GPT_5_4_mini = "gpt-5.4-mini",
   GPT_41 = "gpt-4.1",
@@ -288,7 +271,6 @@ export enum ChatModelProviders {
   GROQ = "groq",
   OLLAMA = "ollama",
   LM_STUDIO = "lm-studio",
-  COPILOT_PLUS = "copilot-plus",
   MISTRAL = "mistralai",
   DEEPSEEK = "deepseek",
   COHEREAI = "cohereai",
@@ -309,15 +291,6 @@ export const MODEL_CAPABILITIES: Record<ModelCapability, string> = {
 
 export const BUILTIN_CHAT_MODELS: CustomModel[] = [
   // Enabled models first
-  {
-    name: ChatModels.COPILOT_PLUS_FLASH,
-    provider: ChatModelProviders.COPILOT_PLUS,
-    enabled: true,
-    isBuiltIn: true,
-    core: true,
-    plusExclusive: true,
-    capabilities: [ModelCapability.VISION],
-  },
   {
     name: ChatModels.OPENROUTER_GEMINI_2_5_FLASH,
     provider: ChatModelProviders.OPENROUTERAI,
@@ -610,12 +583,6 @@ export const ProviderInfo: Record<Provider, ProviderMetadata> = {
     keyManagementURL: "https://platform.deepseek.com/api-keys",
     testModel: ChatModels.DEEPSEEK_CHAT,
   },
-  [ChatModelProviders.COPILOT_PLUS]: {
-    label: "Copilot",
-    host: BREVILABS_MODELS_BASE_URL,
-    curlBaseURL: BREVILABS_MODELS_BASE_URL,
-    keyManagementURL: "",
-  },
 };
 
 // Map provider to its settings key for API key
@@ -627,7 +594,6 @@ export const ProviderSettingsKeyMap: Record<SettingKeyProviders, keyof CopilotSe
   openrouterai: "openRouterAiApiKey",
   cohereai: "cohereApiKey",
   xai: "xaiApiKey",
-  "copilot-plus": "plusLicenseKey",
   mistralai: "mistralApiKey",
   deepseek: "deepseekApiKey",
   siliconflow: "siliconflowApiKey",
@@ -760,11 +726,6 @@ export const OPENCODE_RELEASE_API_URL_TEMPLATE =
 
 export const DEFAULT_SETTINGS: CopilotSettings = {
   userId: uuidv4(),
-  isPaidUser: false,
-  isPlusUser: false,
-  entitlementToken: "",
-  entitlementExpiresAt: 0,
-  plusLicenseKey: "",
   openAIApiKey: "",
   openAIOrgId: "",
   huggingfaceApiKey: "",
@@ -794,6 +755,8 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   defaultConversationTag: "copilot-conversation",
   autosaveChat: true,
   autoAddActiveContentToContext: true,
+  strictContextScope: false,
+  agentScopeMode: "off",
   defaultOpenArea: DEFAULT_OPEN_AREA.VIEW,
   defaultSendShortcut: SEND_SHORTCUT.ENTER,
   customPromptsFolder: DEFAULT_CUSTOM_PROMPTS_FOLDER,
@@ -819,6 +782,16 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   passMarkdownImages: true,
   enableAutonomousAgent: true,
   enableCustomPromptTemplating: true,
+  // Independent Codex Agent web tools are opt-in and use a separate credential
+  // from the self-host web-search configuration.
+  enableAgentWebTools: false,
+  enableImageAutoIndex: false,
+  agentWebSearchProvider: "firecrawl",
+  firecrawlAgentWebApiKey: "",
+  tavilyAgentWebApiKey: "",
+  exaAgentWebApiKey: "",
+  customAgentWebApiKey: "",
+  customAgentWebBaseUrl: "",
   enableSelfHostMode: false,
   enableMiyo: false,
   enableMiyoSearchSkill: false,
@@ -831,7 +804,7 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   parallelApiKey: "",
   exaApiKey: "",
   supadataApiKey: "",
-  docProcessorBackend: "plus",
+  docProcessorBackend: "miyo",
   enableLexicalBoosts: true,
   suggestedDefaultCommands: false,
   autonomousAgentMaxIterations: 4,

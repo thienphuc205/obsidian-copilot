@@ -4,19 +4,27 @@ import { FanoutMessageCard } from "@/agentMode/ui/FanoutMessageCard";
 import { PlanProposalCard } from "@/agentMode/ui/PlanProposalCard";
 import { ToolPermissionCard } from "@/agentMode/ui/ToolPermissionCard";
 import { AgentTurnDurationIndicator } from "@/agentMode/ui/AgentTurnDurationIndicator";
+import { AgentSourceList } from "@/agentMode/ui/AgentSourceList";
 import ChatSingleMessage from "@/components/chat-components/ChatSingleMessage";
 import { USER_SENDER } from "@/constants";
 import { useChatScrolling } from "@/hooks/useChatScrolling";
 import type { AgentChatBackend } from "@/agentMode/session/AgentChatBackend";
 import type {
   AgentChatMessage,
+  AgentMessagePart,
   AskUserQuestionPrompt,
   CurrentPlan,
   PermissionPrompt,
 } from "@/agentMode/session/types";
+import {
+  deriveResearchProgress,
+  isResearchRun,
+  toResearchToolEvent,
+} from "@/agentMode/ui/researchProgress";
+import { openFileInWorkspace } from "@/utils";
 import type { ChatMessage } from "@/types/message";
-import { App } from "obsidian";
-import React, { memo, useMemo } from "react";
+import { App, TFile } from "obsidian";
+import React, { memo, useCallback, useMemo } from "react";
 
 interface AgentChatMessagesProps {
   messages: AgentChatMessage[];
@@ -56,6 +64,37 @@ function lastAssistant(visible: AgentChatMessage[]): AgentChatMessage | undefine
   return undefined;
 }
 
+/** The nearest preceding user message — the prompt that classifies the turn. */
+function precedingUserMessage(
+  visible: AgentChatMessage[],
+  index: number
+): AgentChatMessage | undefined {
+  for (let i = index - 1; i >= 0; i--) {
+    if (visible[i].sender === USER_SENDER) return visible[i];
+  }
+  return undefined;
+}
+
+/**
+ * Research progress for one assistant turn, or null when the turn is not a
+ * research run or has not made its first tool call yet (the panel only takes
+ * over once there is something to summarize).
+ */
+function researchProgressFor(
+  visible: AgentChatMessage[],
+  index: number,
+  message: AgentChatMessage,
+  isAssistant: boolean
+) {
+  if (!isAssistant || !isResearchRun(precedingUserMessage(visible, index)?.message)) return null;
+  const events = (message.parts ?? [])
+    .filter(
+      (part): part is Extract<AgentMessagePart, { kind: "tool_call" }> => part.kind === "tool_call"
+    )
+    .map(toResearchToolEvent);
+  return deriveResearchProgress(events);
+}
+
 const AgentChatMessages = memo(
   ({
     messages,
@@ -93,6 +132,15 @@ const AgentChatMessages = memo(
     const latestAssistant = useMemo(() => lastAssistant(visible), [visible]);
     const streamingMessageId = isLoading ? latestAssistant?.id : undefined;
 
+    // Opens the finished research note the same way chat source links do.
+    const openResearchNote = useCallback(
+      (path: string) => {
+        const file = app.vault.getAbstractFileByPath(path);
+        if (file instanceof TFile) void openFileInWorkspace(app, file);
+      },
+      [app]
+    );
+
     return (
       <div className="tw-flex tw-h-full tw-flex-1 tw-flex-col tw-overflow-hidden">
         <div
@@ -114,6 +162,9 @@ const AgentChatMessages = memo(
             const isAssistant = message.sender !== USER_SENDER;
             const hasParts = (message.parts?.length ?? 0) > 0;
             const renderTrail = isAssistant && hasParts;
+            const researchProgress = renderTrail
+              ? researchProgressFor(visible, index, message, isAssistant)
+              : null;
             const ownsTurnDuration = isAssistant && message.id === latestAssistant?.id;
             const completedTurnDurationMs = ownsTurnDuration ? message.turnDurationMs : undefined;
             const runningTurnStartedAtMs =
@@ -175,6 +226,8 @@ const AgentChatMessages = memo(
                       timestamp={message.timestamp?.display}
                       app={app}
                       turnStopReason={message.turnStopReason}
+                      researchProgress={researchProgress}
+                      onOpenResearchNote={openResearchNote}
                     />
                   </div>
                 ) : (
@@ -194,6 +247,11 @@ const AgentChatMessages = memo(
                     ) : null}
                   </>
                 )}
+                {isAssistant && !hasParts && (message.sourceReferences?.length ?? 0) > 0 ? (
+                  <div className="tw-px-3 tw-pb-2">
+                    <AgentSourceList app={app} sources={message.sourceReferences ?? []} />
+                  </div>
+                ) : null}
               </div>
             );
           })}

@@ -1,6 +1,12 @@
-import { type Youtube4llmResponse } from "@/LLMProviders/brevilabsClient";
+/** Transcript response shape returned by the self-host YouTube provider. */
+export interface Youtube4llmResponse {
+  response: {
+    transcript: string;
+  };
+  elapsed_time_ms: number;
+}
 import { logError, logInfo } from "@/logger";
-import { isSelfHostModeValid } from "@/plusUtils";
+import { isSelfHostModeEnabled } from "./selfHostMode";
 import { getSettings } from "@/settings/model";
 import { safeFetchNoThrow } from "@/utils";
 import { requireNodeModule } from "@/utils/desktopRuntime";
@@ -50,7 +56,7 @@ export interface SelfHostWebSearchAgentBridge {
  * @param search Runs the configured provider search inside Obsidian.
  */
 export function createSelfHostWebSearchAgentBridge(
-  isModeValid: () => boolean = isSelfHostModeValid,
+  isModeValid: () => boolean = isSelfHostModeEnabled,
   hasSearchKey: () => boolean = hasSelfHostSearchKey,
   search: (query: string) => Promise<SelfHostWebSearchResult> = selfHostWebSearch
 ): Readonly<SelfHostWebSearchAgentBridge> {

@@ -49,6 +49,9 @@ let mockSettings: {
     notificationSoundId: string;
   };
   enableSelfHostMode: boolean;
+  enableAgentWebTools: boolean;
+  agentWebSearchProvider: "firecrawl";
+  firecrawlAgentWebApiKey: string;
 };
 jest.mock("@/settings/model", () => ({
   // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks the real hook; name must match the export
@@ -193,6 +196,9 @@ describe("AgentSettings", () => {
         notificationSoundId: "piano",
       },
       enableSelfHostMode: false,
+      enableAgentWebTools: false,
+      agentWebSearchProvider: "firecrawl",
+      firecrawlAgentWebApiKey: "",
     };
     (setSettings as jest.Mock).mockClear();
     (playNotificationSound as jest.Mock).mockClear();
@@ -260,7 +266,7 @@ describe("AgentSettings", () => {
 
   it("mutes the chime when the notification sound switch is turned off", () => {
     render(<AgentSettings />);
-    const toggle = screen.getByRole("switch");
+    const toggle = screen.getAllByRole("switch")[0];
     expect(toggle.getAttribute("aria-checked")).toBe("true");
 
     fireEvent.click(toggle);

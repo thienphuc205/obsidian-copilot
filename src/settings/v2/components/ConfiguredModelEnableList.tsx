@@ -12,7 +12,6 @@ import {
   useModelManagement,
   type AgentType,
 } from "@/modelManagement";
-import { shouldPreviewCopilotModels } from "@/lib/lockedCopilotEntries";
 import { settingsStore } from "@/settings/model";
 import { useAtomValue } from "jotai";
 import React from "react";
@@ -36,7 +35,7 @@ const isOpencodeRoutableProvider = (
 /**
  * Renders the shared `ModelEnableList` for one agent backend, sourcing
  * candidates from the `configuredModels` registry and toggling through
- * `BackendConfigRegistry`. opencode shows BYOK/Plus models plus its own
+ * `BackendConfigRegistry`. opencode shows BYOK models plus its own
  * agent-origin models; claude/codex show only their agent-origin models.
  * Disabled rows stay visible.
  */
@@ -73,16 +72,9 @@ export const ConfiguredModelEnableList: React.FC<ConfiguredModelEnableListProps>
     [configuredModels, providers, enabledIds, agentType, isOpencode]
   );
 
-  // Ask the provider rows, as both pickers do, rather than letting the grouping
-  // infer a missing license from the rows it just built: registering the provider
-  // and reconciling its models are separate writes, so a licensed user can hold
-  // the provider with nothing under it, and that user must not be shown a locked
-  // group telling them a license is required.
-  const copilotProviderMissing = shouldPreviewCopilotModels(providers);
-
   const groups = React.useMemo<ModelEnableGroup[]>(
-    () => buildModelEnableGroups(partition, isOpencode, query, copilotProviderMissing),
-    [partition, isOpencode, query, copilotProviderMissing]
+    () => buildModelEnableGroups(partition, isOpencode, query),
+    [partition, isOpencode, query]
   );
 
   const handleToggle = React.useCallback(

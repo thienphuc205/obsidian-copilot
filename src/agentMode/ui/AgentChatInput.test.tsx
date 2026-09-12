@@ -1,4 +1,3 @@
-import { EMPTY_AGENT_MENTION_BRANDS } from "@/components/chat-components/hooks/useAtMentionCategories";
 import { AgentChatInput } from "@/agentMode/ui/AgentChatInput";
 import { AGENT_PROMPT_SUGGESTIONS } from "@/agentMode/ui/agentPromptSuggestions";
 import type { AgentChatBackend } from "@/agentMode/session/AgentChatBackend";
@@ -11,14 +10,6 @@ import React from "react";
 // prefix is expected on the mocked hooks below.
 /* eslint-disable @eslint-react/hooks-extra/no-unnecessary-use-prefix */
 
-// Entitlement gate — flipped per test.
-const mockUseCanUseMultiAgent = jest.fn<boolean, []>();
-const mockNavigateToPlusPage = jest.fn();
-jest.mock("@/plusUtils", () => ({
-  useCanUseMultiAgent: () => mockUseCanUseMultiAgent(),
-  navigateToPlusPage: (...args: unknown[]) => mockNavigateToPlusPage(...args),
-}));
-
 // Installed agents the gate either surfaces or suppresses.
 const FAKE_BRANDS = Object.freeze([{ id: "claude", displayName: "Claude", Icon: () => null }]);
 jest.mock("@/agentMode/ui/mentionedAgents", () => ({
@@ -26,6 +17,13 @@ jest.mock("@/agentMode/ui/mentionedAgents", () => ({
   isFanout: () => false,
   resolveAnswerers: () => [],
   useInstalledAgentBrands: () => FAKE_BRANDS,
+}));
+
+const mockPromptForResearchTopic = jest.fn<Promise<string | null>, []>();
+const mockScaffoldResearchNote = jest.fn<Promise<string | null>, unknown[]>();
+jest.mock("@/commands/researchCommands", () => ({
+  promptForResearchTopic: (...args: unknown[]) => mockPromptForResearchTopic(...(args as [])),
+  scaffoldResearchNote: (...args: unknown[]) => mockScaffoldResearchNote(...args),
 }));
 
 // One ChatInput mock serves both suites: it captures the brands handed to the
@@ -141,11 +139,9 @@ describe("AgentChatInput", () => {
   describe("identity and agent-mention gate", () => {
     beforeEach(() => {
       capturedAgentBrands = undefined;
-      mockNavigateToPlusPage.mockClear();
     });
 
-    it("passes the real installed-agent list when entitled", () => {
-      mockUseCanUseMultiAgent.mockReturnValue(true);
+    it("passes the real installed-agent list to the typeahead", () => {
       renderInput(
         { sendMessage: jest.fn(), cancel: jest.fn() } as unknown as AgentChatBackend,
         makeDraft()
@@ -166,15 +162,6 @@ describe("AgentChatInput", () => {
       view.rerender(inputNode(backend, draft, { chatInputId: "input-2" }));
       expect(clearSelectedTextContexts).toHaveBeenCalledTimes(1);
     });
-
-    it("passes the frozen empty list (not a fresh []) when not entitled", () => {
-      mockUseCanUseMultiAgent.mockReturnValue(false);
-      renderInput(
-        { sendMessage: jest.fn(), cancel: jest.fn() } as unknown as AgentChatBackend,
-        makeDraft()
-      );
-      expect(capturedAgentBrands).toBe(EMPTY_AGENT_MENTION_BRANDS);
-    });
   });
 
   describe("sample-prompt placeholder", () => {
@@ -183,7 +170,6 @@ describe("AgentChatInput", () => {
 
     beforeEach(() => {
       capturedPlaceholderPrompts = undefined;
-      mockUseCanUseMultiAgent.mockReturnValue(true);
     });
 
     it("offers the sample prompts on an untouched landing", () => {
@@ -207,6 +193,77 @@ describe("AgentChatInput", () => {
       );
       view.rerender(inputNode(chat, makeDraft({ input: "" }), { isLanding: true }));
       expect(capturedPlaceholderPrompts).toBe(AGENT_PROMPT_SUGGESTIONS);
+    });
+  });
+
+  describe("research quick action", () => {
+    const backend = () =>
+      ({ sendMessage: jest.fn(), cancel: jest.fn() }) as unknown as AgentChatBackend;
+    const plugin = { app: null } as never;
+
+    beforeEach(() => {
+      mockPromptForResearchTopic.mockReset();
+      mockScaffoldResearchNote.mockReset();
+      mockScaffoldResearchNote.mockResolvedValue("Research/Topic (2026-09-11).md");
+    });
+
+    it("scaffolds the note quietly and seeds the composer draft with the research prompt", async () => {
+      mockPromptForResearchTopic.mockResolvedValue("Deep sea vents");
+      const draft = makeDraft({ input: "" });
+
+      renderInput(backend(), draft, { plugin, isLanding: true });
+      fireEvent.click(screen.getByRole("button", { name: "Research" }));
+
+      await waitFor(() => expect(mockScaffoldResearchNote).toHaveBeenCalledTimes(1));
+      expect(mockScaffoldResearchNote).toHaveBeenCalledWith(plugin, "Deep sea vents", {
+        quiet: true,
+      });
+      expect(draft.setInput).toHaveBeenCalledWith(
+        "Use the research skill for: Deep sea vents. Show the plan first, search the vault " +
+          "before the web, and write the result into the research note you create."
+      );
+    });
+
+    it("appends the research prompt after existing draft text", async () => {
+      mockPromptForResearchTopic.mockResolvedValue("Tides");
+      const draft = makeDraft({ input: "and also:" });
+
+      renderInput(backend(), draft, { plugin });
+      fireEvent.click(screen.getByRole("button", { name: "Research" }));
+
+      await waitFor(() => expect(draft.setInput).toHaveBeenCalledTimes(1));
+      expect(draft.setInput).toHaveBeenCalledWith(
+        "and also:\n\nUse the research skill for: Tides. Show the plan first, search the vault " +
+          "before the web, and write the result into the research note you create."
+      );
+    });
+
+    it("does nothing when the topic prompt is cancelled or left blank", async () => {
+      mockPromptForResearchTopic.mockResolvedValue(null);
+      const draft = makeDraft();
+      renderInput(backend(), draft, { plugin });
+
+      fireEvent.click(screen.getByRole("button", { name: "Research" }));
+      await act(async () => {});
+
+      mockPromptForResearchTopic.mockResolvedValue("   ");
+      fireEvent.click(screen.getByRole("button", { name: "Research" }));
+      await act(async () => {});
+
+      expect(mockScaffoldResearchNote).not.toHaveBeenCalled();
+      expect(draft.setInput).not.toHaveBeenCalled();
+    });
+
+    it("is not clickable when the composer is hard-disabled (orphaned project)", async () => {
+      mockPromptForResearchTopic.mockResolvedValue("Deep sea");
+      const draft = makeDraft();
+      renderInput(backend(), draft, { plugin, disabled: true });
+
+      fireEvent.click(screen.getByRole("button", { name: "Research" }));
+      await act(async () => {});
+
+      expect(mockPromptForResearchTopic).not.toHaveBeenCalled();
+      expect(mockScaffoldResearchNote).not.toHaveBeenCalled();
     });
   });
 
@@ -260,9 +317,7 @@ describe("AgentChatInput", () => {
       return updater([])[0];
     };
 
-    beforeEach(() => {
-      mockUseCanUseMultiAgent.mockReturnValue(true);
-    });
+    beforeEach(() => {});
 
     it("snapshots 'context' when the send is held for project-context materialization", async () => {
       const backend = makeBackend();
@@ -349,7 +404,6 @@ describe("AgentChatInput", () => {
     // topRightAccessory slot — the shared component never learns what it is.
     beforeEach(() => {
       capturedTopRightAccessory = undefined;
-      mockUseCanUseMultiAgent.mockReturnValue(true);
     });
 
     it("passes the indicator through the accessory slot when mounted", () => {
@@ -369,9 +423,7 @@ describe("AgentChatInput", () => {
   });
 
   describe("compose reset ordering", () => {
-    beforeEach(() => {
-      mockUseCanUseMultiAgent.mockReturnValue(true);
-    });
+    beforeEach(() => {});
 
     it("regression: clears the composer before awaiting attached-image conversion (#211)", async () => {
       // Hold the image read open so ordering is observable. The composer must

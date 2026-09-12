@@ -1,10 +1,8 @@
 import { Button } from "@/components/ui/button";
-import { HelpTooltip } from "@/components/ui/help-tooltip";
 import { SettingItem } from "@/components/ui/setting-item";
 import { SettingSection } from "@/components/ui/setting-section";
 import { useTab } from "@/contexts/TabContext";
 import { cn } from "@/lib/utils";
-import { useIsSelfHostEligible } from "@/plusUtils";
 import { updateSetting, useSettingsValue, type SelfHostSearchProvider } from "@/settings/model";
 import { SelfHostWebSearchSettings } from "@/settings/v2/components/ui/SelfHostWebSearchSettings";
 import { ArrowUpRight, ShieldCheck } from "lucide-react";
@@ -30,10 +28,8 @@ const SignUpLink: React.FC<{ href: string }> = ({ href }) => (
 
 /**
  * Self-Host tab. The Enable toggle writes the persisted `enableSelfHostMode`
- * flag — the user-preference half of the gate that the cross-tab gating (Agents
- * / BYOK model enumeration, the agent spawn boundary) reads. The entitlement
- * half comes from the signed token's `self_host` feature, which also disables
- * the toggle for plans that don't grant it.
+ * flag — the gate that the cross-tab gating (Agents / BYOK model enumeration,
+ * the agent spawn boundary) reads.
  *
  * The sub-sections below (web-search providers/keys, self-hosted endpoint) are
  * editable while Self-Host Mode is on and disabled while it's off — the ancestor
@@ -43,7 +39,6 @@ const SignUpLink: React.FC<{ href: string }> = ({ href }) => (
 export const SelfHostSettings: React.FC = () => {
   const settings = useSettingsValue();
   const { setSelectedTab } = useTab();
-  const isEligible = useIsSelfHostEligible();
   const selfHostOn = settings.enableSelfHostMode;
 
   return (
@@ -51,9 +46,6 @@ export const SelfHostSettings: React.FC = () => {
       <div className="tw-flex tw-items-start tw-gap-2.5 tw-text-sm tw-text-muted">
         <span className="tw-max-w-[620px]">
           Bring your own infrastructure — self-hosted search, web-search providers, and models.
-        </span>
-        <span className="tw-shrink-0 tw-rounded tw-bg-callout-warning/20 tw-px-2 tw-py-0.5 tw-text-smallest tw-font-semibold tw-text-warning">
-          Lifetime license
         </span>
       </div>
 
@@ -64,17 +56,10 @@ export const SelfHostSettings: React.FC = () => {
           description={
             <span className="tw-inline-flex tw-items-center tw-gap-1.5">
               Route LLMs, embeddings and document understanding through your own endpoints.
-              <HelpTooltip content="Believer / Supporter only. Use your own infrastructure for full control and offline use. Stays available offline until your entitlement expires." />
             </span>
           }
           checked={selfHostOn}
           onCheckedChange={(checked) => updateSetting("enableSelfHostMode", checked)}
-          // Only an entitlement that grants self-host may flip this on; the
-          // still-resolving `undefined` keeps it locked until the check settles.
-          // Turning it OFF is always allowed — the preference is the user's to
-          // withdraw, and gating that direction too would strand anyone whose
-          // token stopped verifying with self-host stuck on and unreachable.
-          disabled={isEligible !== true && !selfHostOn}
         />
 
         <div

@@ -1,14 +1,9 @@
 import { getChainType, getModelKey, SetChainOptions } from "@/aiParams";
 import { ChainType } from "@/chainType";
 import { USER_SENDER } from "@/constants";
-import {
-  AutonomousAgentChainRunner,
-  ChainRunner,
-  CopilotPlusChainRunner,
-  LLMChainRunner,
-} from "@/LLMProviders/chainRunner/index";
+import { ChainRunner, LLMChainRunner } from "@/LLMProviders/chainRunner/index";
 import { logError, logInfo } from "@/logger";
-import { getSettings, subscribeToSettingsChange } from "@/settings/model";
+import { subscribeToSettingsChange } from "@/settings/model";
 import { getSystemPrompt } from "@/system-prompts/systemPromptBuilder";
 import { ChatMessage } from "@/types/message";
 import { isOSeriesModel } from "@/utils";
@@ -136,17 +131,10 @@ export default class ChainManager {
 
   private getChainRunner(): ChainRunner {
     const chainType = getChainType();
-    const settings = getSettings();
 
     switch (chainType) {
       case ChainType.LLM_CHAIN:
         return new LLMChainRunner(this);
-      case ChainType.COPILOT_PLUS_CHAIN:
-        // Use AutonomousAgentChainRunner if the setting is enabled
-        if (settings.enableAutonomousAgent) {
-          return new AutonomousAgentChainRunner(this);
-        }
-        return new CopilotPlusChainRunner(this);
       default:
         throw new Error(`Unsupported chain type: ${String(chainType)}`);
     }

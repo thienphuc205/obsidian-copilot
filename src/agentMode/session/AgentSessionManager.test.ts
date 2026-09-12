@@ -9,10 +9,11 @@ import { waitFor } from "@testing-library/react";
 import { AgentSession } from "./AgentSession";
 import type { AgentModelPreloader } from "./AgentModelPreloader";
 import { buildNativeChatId } from "@/utils/nativeChatId";
-import { CHAT_AGENT_VIEWTYPE } from "@/constants";
+import { CHAT_AGENT_VIEWTYPE, USER_SENDER } from "@/constants";
 import { playNotificationSound } from "@/utils/notificationSound";
 import { AgentSessionIndex } from "./AgentSessionIndex";
 import { AgentSessionManager } from "./AgentSessionManager";
+import { computeAgentScope, getActiveAgentScope, setActiveAgentScope } from "./agentScope";
 import { ProjectContentTracker } from "@/context/projectContentTracker";
 import { GLOBAL_SCOPE } from "./scope";
 import {
@@ -123,7 +124,10 @@ jest.mock("@/settings/model", () => ({
 }));
 
 /** Fire the manager's settings subscription with a before/after pair. */
-function emitSettingsChange(prev: { agentMode: unknown }, next: { agentMode: unknown }): void {
+function emitSettingsChange(
+  prev: { agentMode: unknown; agentScopeMode?: unknown },
+  next: { agentMode: unknown; agentScopeMode?: unknown }
+): void {
   for (const cb of settingsChangeCallbacks) cb(prev, next);
 }
 
@@ -159,7 +163,15 @@ interface MockSessionTestHandle {
     status: "starting" | "idle" | "running" | "awaiting_permission" | "error" | "closed"
   ): void;
   /** Seed the display messages so a manual save writes a file (and a path). */
-  setMessages(messages: { message: string }[]): void;
+  setMessages(
+    messages: Array<{
+      message: string;
+      sender?: string;
+      context?: { notes?: unknown[]; folders?: unknown[]; urls?: unknown[] };
+    }>
+  ): void;
+  /** Fire the mock session's message listeners the way a send does. */
+  emitMessagesChanged(): void;
   /** Toggle whether the session reports user-visible messages (detach gating). */
   setHasUserVisibleMessages(value: boolean): void;
 }
@@ -170,6 +182,12 @@ function getSessionTestHandle(session: AgentSession): MockSessionTestHandle {
   const handle = sessionTestHandles.get(session.internalId);
   if (!handle) throw new Error(`No test handle for ${session.internalId}`);
   return handle;
+}
+
+interface MockDisplayMessage {
+  message: string;
+  sender?: string;
+  context?: { notes?: unknown[]; folders?: unknown[]; urls?: unknown[] };
 }
 
 function makeMockSession(overrides: {
@@ -183,9 +201,11 @@ function makeMockSession(overrides: {
   const sessionId = overrides.backendSessionId ?? `backend-${nextBackendSessionId++}`;
   let status: "starting" | "idle" | "running" | "awaiting_permission" | "error" | "closed" = "idle";
   let needsAttention = false;
-  let displayMessages: { message: string }[] = [];
+  let displayMessages: MockDisplayMessage[] = [];
   let hasUserVisibleMessages = false;
+  let agentScope: unknown = null;
   const listeners = new Set<{
+    onMessagesChanged?: () => void;
     onStatusChanged?: (s: typeof status) => void;
     onNeedsAttentionChanged?: (v: boolean) => void;
   }>();
@@ -214,6 +234,10 @@ function makeMockSession(overrides: {
     getState: () => null,
     getRawSnapshot: () => ({ models: null, modes: null, configOptions: null }),
     getNeedsAttention: () => needsAttention,
+    getAgentScope: () => agentScope,
+    setAgentScope: (scope: unknown) => {
+      agentScope = scope;
+    },
     markNeedsAttention: () => {
       if (needsAttention) return;
       needsAttention = true;
@@ -233,6 +257,9 @@ function makeMockSession(overrides: {
     },
     setMessages: (messages) => {
       displayMessages = messages;
+    },
+    emitMessagesChanged: () => {
+      for (const l of listeners) l.onMessagesChanged?.();
     },
     setHasUserVisibleMessages: (value) => {
       hasUserVisibleMessages = value;
@@ -299,7 +326,7 @@ function buildWorkspace(): unknown {
   };
 }
 
-function buildApp(basePath = "/vault"): App {
+function buildApp(basePath = "/vault", vaultFilePaths: string[] = []): App {
   const adapter = new (FileSystemAdapter as unknown as new (basePath: string) => unknown)(basePath);
   // The ProjectContentTracker registers vault AND metadata-cache event listeners
   // at construction; provide no-op `on`/`offref` on both so a manager can be built.
@@ -312,7 +339,7 @@ function buildApp(basePath = "/vault"): App {
   // disk) is the "nothing to initialize" case, so no files are written.
   const vaultFiles = {
     getAbstractFileByPath: jest.fn(() => null),
-    getFiles: jest.fn(() => []),
+    getFiles: jest.fn(() => vaultFilePaths.map((path) => ({ path }))),
     create: jest.fn(),
     read: jest.fn(async () => ""),
     modify: jest.fn(),
@@ -322,6 +349,26 @@ function buildApp(basePath = "/vault"): App {
     metadataCache: { ...events },
     workspace: buildWorkspace(),
   } as unknown as App;
+}
+
+/**
+ * Point the mocked `getSettings` at a sandbox mode for the duration of one
+ * test, restoring the previous implementation afterwards — the default factory
+ * must stay intact for the rest of the suite.
+ */
+/**
+ * Point the mocked `getSettings` at a sandbox mode for the duration of one
+ * test, restoring the previous implementation afterwards — the default factory
+ * must stay intact for the rest of the suite.
+ */
+function useAgentScopeMode(mode: "off" | "selected-context"): () => void {
+  const mock = mockedGetSettings as jest.Mock;
+  const base = mock.getMockImplementation() as (() => Record<string, unknown>) | undefined;
+  mock.mockImplementation(() => ({
+    ...(base ? base() : {}),
+    agentScopeMode: mode,
+  }));
+  return () => mock.mockImplementation(base as () => never);
 }
 
 function buildPlugin(): { manifest: { version: string } } {
@@ -351,9 +398,15 @@ function modelCatalog(baseModelId: string): BackendModelCatalog {
 }
 
 function buildManager(
-  modelPreloaderOverrides: Partial<AgentModelPreloader> = {}
+  modelPreloaderOverrides: Partial<AgentModelPreloader> = {},
+  overrides: {
+    /** Vault-relative file paths the mocked inventory reports to the sandbox. */
+    vaultFilePaths?: string[];
+    /** Overrides merged onto the single-registry descriptor. */
+    descriptor?: Partial<BackendDescriptor>;
+  } = {}
 ): AgentSessionManager {
-  const descriptor = buildDescriptor();
+  const descriptor: BackendDescriptor = { ...buildDescriptor(), ...overrides.descriptor };
   const modelPreloader = {
     getCachedModelCatalog: jest.fn(() => null),
     getEffortCatalog: jest.fn(() => null),
@@ -367,7 +420,7 @@ function buildManager(
     ...modelPreloaderOverrides,
   };
   return new AgentSessionManager(
-    buildApp(),
+    buildApp("/vault", overrides.vaultFilePaths),
     buildPlugin() as unknown as ConstructorParameters<typeof AgentSessionManager>[1],
     {
       permissionPrompter: jest.fn(),
@@ -392,11 +445,16 @@ beforeEach(() => {
   mockSessionDispose.mockClear();
   sessionCreateSpy.mockClear();
   nextBackendSessionId = 1;
+  // The vault-selection sandbox is a module-global sticky scope; a leaked
+  // selection would confine unrelated sessions' cwd assertions.
+  setActiveAgentScope(null);
   // Managers from prior tests never shut down, so their settings
   // subscriptions linger; clear them so emitSettingsChange only reaches
   // the manager built in the current test.
   settingsChangeCallbacks.clear();
 });
+
+afterEach(() => setActiveAgentScope(null));
 
 describe("AgentSessionManager", () => {
   describe("AgentSessionManager", () => {
@@ -624,6 +682,280 @@ describe("AgentSessionManager", () => {
         }
       });
     });
+
+    describe("vault-selection sandbox", () => {
+      /** A selection over the mocked inventory, matching what a first turn carries. */
+      function makeSelection(
+        folders: string[],
+        files: string[] = []
+      ): ReturnType<typeof computeAgentScope> {
+        return computeAgentScope(
+          { contextFolders: folders, contextNotes: files.map((path) => ({ path })) },
+          "/vault",
+          { availableFilePaths: files }
+        );
+      }
+
+      function firstOpenInput(): { cwd: string; scope?: unknown } {
+        return sessionCreateSpy.mock.calls[0][0];
+      }
+
+      it("opens a global session inside the sticky selection's common root", async () => {
+        const selection = makeSelection(["Research"]);
+        setActiveAgentScope(selection);
+        const mgr = buildManager();
+        await mgr.createSession();
+
+        const openInput = firstOpenInput();
+        // The common root IS the workspace-write boundary the ACP backends enforce.
+        expect(openInput.cwd).toBe("/vault/Research");
+        expect(openInput.scope).toBe(selection);
+      });
+
+      it("opens vault-wide with no scope in the open input when no selection is sticky", async () => {
+        const mgr = buildManager();
+        await mgr.createSession();
+
+        const openInput = firstOpenInput();
+        expect(openInput.cwd).toBe("/vault");
+        expect(openInput.scope).toBeUndefined();
+      });
+
+      it("keeps a project session's natural cwd when the selection reaches outside it", async () => {
+        setActiveAgentScope(makeSelection(["Other"]));
+        const projectId = "project-outside-scope";
+        const recordSpy = jest
+          .spyOn(projectsState, "getCachedProjectRecordById")
+          .mockImplementation((id: string) =>
+            id === projectId
+              ? ({
+                  filePath: `Projects/${projectId}/project.md`,
+                  project: { id: projectId },
+                } as unknown as ReturnType<typeof projectsState.getCachedProjectRecordById>)
+              : undefined
+          );
+        try {
+          const mgr = buildManager();
+          await mgr.createSession(undefined, projectId);
+
+          const openInput = firstOpenInput();
+          // Re-homing the session would move its AGENTS.md discovery and
+          // materialized-context storage; the scope still rides the open input
+          // for consumers that enforce without cwd.
+          expect(openInput.cwd).toBe(join("/vault", "Projects/project-outside-scope"));
+          expect(openInput.scope).toBe(getActiveAgentScope());
+        } finally {
+          recordSpy.mockRestore();
+        }
+      });
+
+      it("records the first turn's selection on the session and publishes it as sticky", async () => {
+        const mgr = buildManager({}, { vaultFilePaths: ["Research/paper.md"] });
+        const session = await mgr.createSession();
+        expect(mgr.getAgentScope(session.internalId)).toBeNull();
+        expect(getActiveAgentScope()).toBeNull();
+
+        const restoreMode = useAgentScopeMode("selected-context");
+        try {
+          const handle = getSessionTestHandle(session);
+          handle.setMessages([
+            {
+              message: "summarize",
+              sender: USER_SENDER,
+              context: { notes: [{ path: "Research/paper.md" }], urls: [] },
+            },
+          ]);
+          handle.emitMessagesChanged();
+
+          const scope = mgr.getAgentScope(session.internalId);
+          expect(scope?.vaultRelativeFiles).toEqual(new Set(["Research/paper.md"]));
+          expect(getActiveAgentScope()).toBe(scope);
+        } finally {
+          restoreMode();
+        }
+      });
+
+      it("records a selection-less first turn without disturbing the sticky scope", async () => {
+        setActiveAgentScope(makeSelection(["Research"]));
+        const mgr = buildManager({}, { vaultFilePaths: ["Research/paper.md"] });
+        const session = await mgr.createSession();
+
+        const restoreMode = useAgentScopeMode("selected-context");
+        try {
+          const handle = getSessionTestHandle(session);
+          handle.setMessages([{ message: "plain turn", sender: USER_SENDER }]);
+          handle.emitMessagesChanged();
+
+          // Computed once as "no selection": the sticky area stays in force
+          // until a later first-turn selection or the mode turning off.
+          expect(mgr.getAgentScope(session.internalId)).toBeNull();
+          expect(getActiveAgentScope()).not.toBeNull();
+        } finally {
+          restoreMode();
+        }
+      });
+
+      it("does not compute or publish while the sandbox mode is off", async () => {
+        const mgr = buildManager({}, { vaultFilePaths: ["Research/paper.md"] });
+        const session = await mgr.createSession();
+
+        const restoreMode = useAgentScopeMode("off");
+        try {
+          const handle = getSessionTestHandle(session);
+          handle.setMessages([
+            {
+              message: "hi",
+              sender: USER_SENDER,
+              context: { notes: [{ path: "Research/paper.md" }], urls: [] },
+            },
+          ]);
+          handle.emitMessagesChanged();
+
+          expect(mgr.getAgentScope(session.internalId)).toBeNull();
+          expect(getActiveAgentScope()).toBeNull();
+        } finally {
+          restoreMode();
+        }
+      });
+
+      it("computes the selection once per session, so a later message never re-scopes it", async () => {
+        const mgr = buildManager({}, { vaultFilePaths: ["Research/paper.md", "Notes/todo.md"] });
+        const session = await mgr.createSession();
+
+        const restoreMode = useAgentScopeMode("selected-context");
+        try {
+          const handle = getSessionTestHandle(session);
+          handle.setMessages([
+            {
+              message: "first",
+              sender: USER_SENDER,
+              context: { notes: [{ path: "Research/paper.md" }], urls: [] },
+            },
+          ]);
+          handle.emitMessagesChanged();
+          const first = mgr.getAgentScope(session.internalId);
+          expect(first?.vaultRelativeFiles).toEqual(new Set(["Research/paper.md"]));
+
+          handle.setMessages([
+            {
+              message: "first",
+              sender: USER_SENDER,
+              context: { notes: [{ path: "Research/paper.md" }], urls: [] },
+            },
+            {
+              message: "second",
+              sender: USER_SENDER,
+              context: { notes: [{ path: "Notes/todo.md" }], urls: [] },
+            },
+          ]);
+          handle.emitMessagesChanged();
+
+          expect(mgr.getAgentScope(session.internalId)).toBe(first);
+          expect(getActiveAgentScope()).toBe(first);
+        } finally {
+          restoreMode();
+        }
+      });
+
+      it("queues a deferred backend restart when the sticky selection changes on a spawn-config backend", async () => {
+        const mgr = buildManager(
+          {},
+          {
+            vaultFilePaths: ["Research/paper.md"],
+            // Spawn-time consumers declare their staleness exactly where the
+            // prompt does — restartOnSystemPromptChange.
+            descriptor: { restartOnSystemPromptChange: true },
+          }
+        );
+        const restartSpy = jest.spyOn(mgr, "restartBackend").mockResolvedValue(true);
+        const session = await mgr.createSession();
+
+        const restoreMode = useAgentScopeMode("selected-context");
+        try {
+          const handle = getSessionTestHandle(session);
+          handle.setMessages([
+            {
+              message: "hi",
+              sender: USER_SENDER,
+              context: { notes: [{ path: "Research/paper.md" }], urls: [] },
+            },
+          ]);
+          handle.emitMessagesChanged();
+
+          expect(restartSpy).toHaveBeenCalledWith("opencode", "agent scope changed");
+        } finally {
+          restoreMode();
+        }
+      });
+
+      it("does not re-queue the restart when a second session selects the same area", async () => {
+        const mgr = buildManager(
+          {},
+          {
+            vaultFilePaths: ["Research/paper.md"],
+            descriptor: { restartOnSystemPromptChange: true },
+          }
+        );
+        const restartSpy = jest.spyOn(mgr, "restartBackend").mockResolvedValue(true);
+        const first = await mgr.createSession();
+        const second = await mgr.createSession();
+
+        const restoreMode = useAgentScopeMode("selected-context");
+        try {
+          const selection = {
+            message: "hi",
+            sender: USER_SENDER,
+            context: { notes: [{ path: "Research/paper.md" }], urls: [] },
+          };
+          const firstHandle = getSessionTestHandle(first);
+          firstHandle.setMessages([selection]);
+          firstHandle.emitMessagesChanged();
+          const secondHandle = getSessionTestHandle(second);
+          secondHandle.setMessages([selection]);
+          secondHandle.emitMessagesChanged();
+
+          expect(restartSpy).toHaveBeenCalledTimes(1);
+        } finally {
+          restoreMode();
+        }
+      });
+
+      it("skips the backend restart when the backend resolves its sandbox per turn", async () => {
+        const mgr = buildManager({}, { vaultFilePaths: ["Research/paper.md"] });
+        const restartSpy = jest.spyOn(mgr, "restartBackend").mockResolvedValue(true);
+        const session = await mgr.createSession();
+
+        const restoreMode = useAgentScopeMode("selected-context");
+        try {
+          const handle = getSessionTestHandle(session);
+          handle.setMessages([
+            {
+              message: "hi",
+              sender: USER_SENDER,
+              context: { notes: [{ path: "Research/paper.md" }], urls: [] },
+            },
+          ]);
+          handle.emitMessagesChanged();
+
+          expect(mgr.getAgentScope(session.internalId)).not.toBeNull();
+          expect(restartSpy).not.toHaveBeenCalled();
+        } finally {
+          restoreMode();
+        }
+      });
+
+      it("drops the sticky selection when the sandbox mode turns off", () => {
+        setActiveAgentScope(makeSelection(["Research"]));
+        buildManager();
+
+        emitSettingsChange(
+          { agentMode: {}, agentScopeMode: "selected-context" },
+          { agentMode: {}, agentScopeMode: "off" }
+        );
+
+        expect(getActiveAgentScope()).toBeNull();
+      });
+    });
   });
 });
 
@@ -749,6 +1081,127 @@ describe("AgentSessionManager warm-backend reuse", () => {
     expect(preloader.takeWarm).toHaveBeenCalledWith("opencode");
     expect(descriptor.createBackendProcess).not.toHaveBeenCalled();
     expect(mockBackendStart).not.toHaveBeenCalled();
+  });
+
+  it("does not adopt a preload that settles after manager shutdown", async () => {
+    let resolvePreload!: () => void;
+    let preloadSettled = false;
+    const preloadPromise = new Promise<void>((resolve) => {
+      resolvePreload = resolve;
+    });
+    const warmShutdown = jest.fn(async () => undefined);
+    const warmProc = { ...makeMockBackendProcess(), shutdown: warmShutdown };
+    const descriptor = buildDescriptor();
+    const preloader = {
+      getCachedModelCatalog: jest.fn(() => null),
+      getEffortCatalog: jest.fn(() => null),
+      preload: jest.fn(() => preloadPromise),
+      refresh: jest.fn(() => null),
+      subscribe: jest.fn(() => () => {}),
+      shutdown: jest.fn(async () => {
+        // A real preloader owns this warm process while its probe is pending.
+        await warmProc.shutdown();
+      }),
+      clearCached: jest.fn(),
+      takeWarm: jest.fn(() => (preloadSettled ? { proc: warmProc } : null)),
+      getWarmProcs: jest.fn(() => []),
+    };
+    const mgr = new AgentSessionManager(
+      buildApp(),
+      buildPlugin() as unknown as ConstructorParameters<typeof AgentSessionManager>[1],
+      {
+        permissionPrompter: jest.fn(),
+        resolveDescriptor: (id) => (id === descriptor.id ? descriptor : undefined),
+        modelPreloader: preloader as unknown as ConstructorParameters<
+          typeof AgentSessionManager
+        >[2]["modelPreloader"],
+      }
+    );
+    mgr.registerPreload("opencode", preloadPromise);
+
+    const sessionPromise = mgr.createSession();
+    await waitFor(() => expect(preloader.preload).toHaveBeenCalledWith("opencode"));
+
+    const shutdownPromise = mgr.shutdown();
+    expect(preloader.shutdown).toHaveBeenCalledTimes(1);
+    expect(warmShutdown).toHaveBeenCalledTimes(1);
+
+    preloadSettled = true;
+    resolvePreload();
+    await expect(sessionPromise).rejects.toThrow(/shut down/);
+    await shutdownPromise;
+
+    expect(preloader.takeWarm).not.toHaveBeenCalled();
+    expect(descriptor.createBackendProcess).not.toHaveBeenCalled();
+    expect(sessionCreateSpy).not.toHaveBeenCalled();
+    expect(warmShutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it("reclaims a backend whose start is pending when manager shutdown begins", async () => {
+    let releaseStart!: () => void;
+    const startPromise = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    mockBackendStart.mockImplementationOnce(async () => {
+      await startPromise;
+    });
+    const mgr = buildManager();
+
+    const sessionPromise = mgr.createSession();
+    await waitFor(() => expect(mockBackendStart).toHaveBeenCalledTimes(1));
+
+    const shutdownPromise = mgr.shutdown();
+    releaseStart();
+
+    await expect(sessionPromise).rejects.toThrow(/shut down/);
+    await shutdownPromise;
+    expect(mockBackendShutdown).toHaveBeenCalledTimes(1);
+    expect(mgr.getSessions()).toEqual([]);
+  });
+
+  it("does not wait forever for an uncancellable backend start during shutdown", async () => {
+    mockBackendStart.mockImplementationOnce(() => new Promise<undefined>(() => {}));
+    const mgr = buildManager();
+    const sessionPromise = mgr.createSession();
+    await waitFor(() => expect(mockBackendStart).toHaveBeenCalledTimes(1));
+
+    let timer: number | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = window.setTimeout(() => reject(new Error("manager shutdown exceeded bound")), 100);
+    });
+    try {
+      await expect(Promise.race([mgr.shutdown(), deadline])).resolves.toBeUndefined();
+    } finally {
+      if (timer !== undefined) window.clearTimeout(timer);
+    }
+
+    await expect(sessionPromise).rejects.toThrow(/shut down/);
+    expect(mockBackendShutdown).toHaveBeenCalledTimes(1);
+    expect(mgr.getSessions()).toEqual([]);
+  });
+
+  it("reclaims a pending start exactly once when it resolves after shutdown", async () => {
+    let releaseStart!: () => void;
+    const startPromise = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    mockBackendStart.mockImplementationOnce(async () => {
+      await startPromise;
+    });
+    const mgr = buildManager();
+    const sessionPromise = mgr.createSession();
+    await waitFor(() => expect(mockBackendStart).toHaveBeenCalledTimes(1));
+
+    await mgr.shutdown();
+    expect(mockBackendShutdown).toHaveBeenCalledTimes(1);
+
+    // The logical start was already cancelled. A late backend completion must
+    // not adopt it or invoke the idempotent stop path a second time.
+    releaseStart();
+    await expect(sessionPromise).rejects.toThrow(/shut down/);
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    expect(mockBackendShutdown).toHaveBeenCalledTimes(1);
+    expect(mgr.getSessions()).toEqual([]);
   });
 
   it("falls back to a fresh spawn when no warm entry is available", async () => {

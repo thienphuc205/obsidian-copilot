@@ -117,7 +117,7 @@ export function wireAgentModelDiscovery(
  * Enroll one backend's reported wire ids through `AgentSetupApi`: first
  * enrollment registers the provider and picks the initially-enabled set;
  * later enrollments only reconcile the model list. opencode first drops models
- * it shares with a Copilot-managed provider.
+ * it shares with a Copilot-managed BYOK provider.
  */
 async function enrollBackend(
   api: ModelManagementApi,
@@ -144,8 +144,8 @@ async function enrollBackend(
   }
 
   // An empty list means a transient/degraded probe (zero models settled, or —
-  // for opencode — every model was suppressed as Copilot-managed), NOT "the
-  // user removed everything". Syncing it would cascade-remove every enrolled
+  // for opencode — every model was suppressed as BYOK-managed), NOT "the user
+  // removed everything". Syncing it would cascade-remove every enrolled
   // model, so skip and let a later non-empty probe re-enroll.
   if (wireModelIds.length === 0) {
     logInfo(
@@ -205,31 +205,25 @@ async function enrollBackend(
 }
 
 /**
- * Drop opencode wire ids hosted by a Copilot-managed (BYOK / Plus) provider,
- * keeping only the opencode-only ids. Builds the managed-provider-id set from
- * the registry here (impure) and delegates the filtering to a pure function.
+ * Drop opencode wire ids hosted by a Copilot-managed BYOK provider, keeping
+ * only the opencode-only ids. Builds the managed-provider-id set from the
+ * registry here (impure) and delegates the filtering to a pure function.
  */
 function suppressManagedOpencode(api: ModelManagementApi, reported: readonly string[]): string[] {
-  const byokAndPlus = [
-    ...api.providerRegistry.listByOrigin("byok"),
-    ...api.providerRegistry.listByOrigin("copilot-plus"),
-  ];
-  const managed = buildManagedOpencodeProviderIds(byokAndPlus);
+  const managed = buildManagedOpencodeProviderIds(api.providerRegistry.listByOrigin("byok"));
   return partitionOpencodeOnlyWireIds(reported, managed);
 }
 
 /**
- * The opencode provider ids Copilot already manages via the user's BYOK / Plus
+ * The opencode provider ids Copilot already manages via the user's BYOK
  * providers, used to suppress those models from opencode's reported catalog.
  * Agent-origin providers are excluded — they ARE the opencode-only models we
  * want to enroll, so they must never suppress themselves. Unroutable providers
  * map to `null` and contribute nothing.
  */
-export function buildManagedOpencodeProviderIds(
-  byokAndPlusProviders: readonly Provider[]
-): Set<string> {
+export function buildManagedOpencodeProviderIds(byokProviders: readonly Provider[]): Set<string> {
   const managed = new Set<string>();
-  for (const provider of byokAndPlusProviders) {
+  for (const provider of byokProviders) {
     if (provider.origin.kind === "agent") continue;
     const mapping = mapProviderToOpencodeId(provider);
     if (!mapping) continue;

@@ -73,14 +73,6 @@ describe("mapProviderTypeToChatModelProvider", () => {
     ).toBe(ChatModelProviders.OPENAI_FORMAT);
   });
 
-  it("maps Copilot Plus providers to the dedicated Plus constructor", () => {
-    expect(
-      mapProviderTypeToChatModelProvider(
-        provider({ origin: { kind: "copilot-plus" }, requiresApiKey: false })
-      )
-    ).toBe(ChatModelProviders.COPILOT_PLUS);
-  });
-
   it("routes custom xAI endpoints through the OpenAI-format constructor", () => {
     expect(
       mapProviderTypeToChatModelProvider(
@@ -197,16 +189,6 @@ describe("configuredModelToCustomModel", () => {
       apiKey: null,
     });
     expect(missingStoredKey.requiresApiKey).toBe(true);
-  });
-
-  it("does not substitute a placeholder key for Copilot Plus", () => {
-    const custom = configuredModelToCustomModel({
-      provider: provider({ origin: { kind: "copilot-plus" }, requiresApiKey: false }),
-      configuredModel: configuredModel(),
-      apiKey: null,
-    });
-    expect(custom.apiKey).toBeUndefined();
-    expect(custom.requiresApiKey).toBe(true);
   });
 
   it("derives capabilities from the model snapshot", () => {

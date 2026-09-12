@@ -109,12 +109,11 @@ export function getSearchBackend(settings: CopilotSettings = getSettings()): "ke
  * asynchronous verification has landed yet.
  *
  * @param settings - Settings being migrated.
- * @returns "miyo" when self-host mode and Miyo are both enabled, else "plus".
+ * @returns "miyo" when self-host mode and Miyo are both enabled, else the
+ *   stored/default value (the legacy "plus" relay is gone).
  */
-export function seedDocProcessorBackend(
-  settings: CopilotSettings = getSettings()
-): "plus" | "miyo" {
-  return settings.enableSelfHostMode && settings.enableMiyo ? "miyo" : "plus";
+export function seedDocProcessorBackend(settings: CopilotSettings = getSettings()): "miyo" {
+  return "miyo";
 }
 
 /**

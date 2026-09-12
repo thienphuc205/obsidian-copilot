@@ -62,10 +62,6 @@ function normalizeBaseUrl(value: string | undefined): string {
  * when known.
  */
 export function mapProviderTypeToChatModelProvider(provider: Provider): ChatModelProviders {
-  if (provider.origin.kind === "copilot-plus") {
-    return ChatModelProviders.COPILOT_PLUS;
-  }
-
   switch (provider.providerType) {
     case "anthropic":
       return ChatModelProviders.ANTHROPIC;

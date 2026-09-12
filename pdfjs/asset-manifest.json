@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "package": {
+    "integrity": "sha512-ZHjSVpDa3D6izMq8/04lvkhkATUmL9px6ChPaXc1k6nU2Mrhlg1/7F0bdUqCwUjw3NsPTfPZsMDUU6ZIcRaeQw==",
+    "license": "Apache-2.0",
+    "name": "pdfjs-dist",
+    "version": "6.3.289"
+  },
+  "versionPair": {
+    "api": "6.3.289",
+    "worker": "6.3.289"
+  },
+  "runtime": {
+    "byteInputOnly": true,
+    "fallback": "none",
+    "standardFonts": "standard_fonts/",
+    "worker": "pdf.worker.mjs",
+    "workerRequired": true,
+    "workerType": "module"
+  },
+  "build": {
+    "bundler": "esbuild",
+    "bundlerVersion": "0.25.0",
+    "target": "es2020",
+    "minify": true,
+    "sourcemap": false
+  },
+  "network": {
+    "documentDownload": false,
+    "runtimeAssetDownload": false
+  },
+  "excluded": ["cmaps", "image_decoders", "wasm", "@napi-rs/canvas"],
+  "files": [
+    {
+      "bytes": 10174,
+      "path": "licenses/pdfjs/LICENSE",
+      "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+      "bytes": 1553,
+      "path": "licenses/standard_fonts/LICENSE_FOXIT",
+      "sha256": "b578cdd2345840ada550bd12519533812320d5f1d21cf4c1c7e1b1b0a31c98b7"
+    },
+    {
+      "bytes": 22154,
+      "path": "licenses/standard_fonts/LICENSE_LIBERATION",
+      "sha256": "d2c4d5b3e115a519cb58eb691aa64538397e2611f9ebe801392cf9667997e7dc"
+    },
+    {
+      "bytes": 482884,
+      "path": "pdf-parser.mjs",
+      "sha256": "989a9c028eb7a9c769111e07bc6c302ab169bf89f6c98b5fc1c31cb7bbe79255"
+    },
+    {
+      "bytes": 2228489,
+      "path": "pdf.worker.mjs",
+      "sha256": "f2870db902eaff8397442c912b69459980ac91f6f4b5ed827167b12cf7057930"
+    },
+    {
+      "bytes": 29513,
+      "path": "standard_fonts/FoxitDingbats.pfb",
+      "sha256": "845c752392b6c914fb989c75a08b7792b88f542d2499042ef2889f8c814a16ed"
+    },
+    {
+      "bytes": 17597,
+      "path": "standard_fonts/FoxitFixed.pfb",
+      "sha256": "b6c8fe53f134b8b6d4578cd2d544df4cee9624c4efa8d51a560fb40ea296101b"
+    },
+    {
+      "bytes": 18055,
+      "path": "standard_fonts/FoxitFixedBold.pfb",
+      "sha256": "f1b7159702973f54fc86254ea38bcf3712b2a736eb3a0995751e9f4bb45ad603"
+    },
+    {
+      "bytes": 19151,
+      "path": "standard_fonts/FoxitFixedBoldItalic.pfb",
+      "sha256": "8a000945843bd31add06aee63bf9fd41b7578b4f3242a4b7cd46349ad9d24d4d"
+    },
+    {
+      "bytes": 18746,
+      "path": "standard_fonts/FoxitFixedItalic.pfb",
+      "sha256": "5007faf8320fa1fcc08b8894b356ad976f60b992ba29ee5272578bbdebaf3876"
+    },
+    {
+      "bytes": 19469,
+      "path": "standard_fonts/FoxitSerif.pfb",
+      "sha256": "4f57d2b9d884af8f907bf22df6019b52d86cbf6214fdbd02b1ae05472a543f35"
+    },
+    {
+      "bytes": 19395,
+      "path": "standard_fonts/FoxitSerifBold.pfb",
+      "sha256": "0bdf4b04e964139818d51eda03d566ba999fc3ba2421b1c6c51f9dc969022e80"
+    },
+    {
+      "bytes": 20733,
+      "path": "standard_fonts/FoxitSerifBoldItalic.pfb",
+      "sha256": "a406cac82583bf98175cb62c87ed5e95c45fbb34eece63a10b0a13e793cb2e10"
+    },
+    {
+      "bytes": 21227,
+      "path": "standard_fonts/FoxitSerifItalic.pfb",
+      "sha256": "610ae0687198045c4db5d1a6650fd5e92536631706382eb8b72e38df578d0ae9"
+    },
+    {
+      "bytes": 16729,
+      "path": "standard_fonts/FoxitSymbol.pfb",
+      "sha256": "47967d055530e7357088a08403115425643ec2cdfd6201ba8af0fbd7116c1539"
+    },
+    {
+      "bytes": 137052,
+      "path": "standard_fonts/LiberationSans-Bold.ttf",
+      "sha256": "361c61b82d575c5c35fd9157fda8b0194bcfcd0d88ea8521a4fb5dd53d33dddc"
+    },
+    {
+      "bytes": 135124,
+      "path": "standard_fonts/LiberationSans-BoldItalic.ttf",
+      "sha256": "a224075ac17495ad0a3af3bc0a419ac0704a8b3fd1095456201fb9b095fc281d"
+    },
+    {
+      "bytes": 162036,
+      "path": "standard_fonts/LiberationSans-Italic.ttf",
+      "sha256": "832b4406dbef23628800d3aaad21048534ac84d7e3ad955be83b8172ed8ef512"
+    },
+    {
+      "bytes": 139512,
+      "path": "standard_fonts/LiberationSans-Regular.ttf",
+      "sha256": "f8ace1f892b2bd9dc1792ba7f097fa7588f84fed48321480e04de5390828221f"
+    }
+  ]
+}

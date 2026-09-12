@@ -1,4 +1,3 @@
-import { ChainType } from "@/chainType";
 import {
   COPILOT_FOLDER_ROOT,
   DEFAULT_QA_EXCLUSIONS_SETTING,
@@ -154,6 +153,32 @@ describe("sanitizeSettings - autoAddActiveContentToContext migration", () => {
     expect(sanitized.autoAddActiveContentToContext).toBe(
       DEFAULT_SETTINGS.autoAddActiveContentToContext
     );
+  });
+});
+
+describe("sanitizeSettings - strictContextScope", () => {
+  it("defaults to off for settings written before the strict context option existed", () => {
+    const legacySettings = { ...DEFAULT_SETTINGS } as unknown as Record<string, unknown>;
+    delete legacySettings.strictContextScope;
+
+    const sanitized = sanitizeSettings(legacySettings as unknown as CopilotSettings);
+
+    expect(sanitized.strictContextScope).toBe(false);
+  });
+
+  it("preserves an explicit boolean choice", () => {
+    const sanitized = sanitizeSettings({ ...DEFAULT_SETTINGS, strictContextScope: true });
+
+    expect(sanitized.strictContextScope).toBe(true);
+  });
+
+  it("does not enable strict context for malformed persisted values", () => {
+    const sanitized = sanitizeSettings({
+      ...DEFAULT_SETTINGS,
+      strictContextScope: "yes" as unknown as boolean,
+    });
+
+    expect(sanitized.strictContextScope).toBe(false);
   });
 });
 
@@ -672,20 +697,20 @@ describe("getEffectiveUserPrompt - legacy fallback", () => {
 });
 
 describe("sanitizeSettings - docProcessorBackend (v6 field)", () => {
-  it("defaults to 'plus' when missing", () => {
+  it("defaults to the local backend when missing", () => {
     const out = sanitizeSettings({
       ...DEFAULT_SETTINGS,
       docProcessorBackend: undefined,
     } as unknown as CopilotSettings);
-    expect(out.docProcessorBackend).toBe("plus");
+    expect(out.docProcessorBackend).toBe("miyo");
   });
 
-  it("resets an invalid value to 'plus'", () => {
+  it("resets an invalid value to the local backend", () => {
     const out = sanitizeSettings({
       ...DEFAULT_SETTINGS,
       docProcessorBackend: "bogus",
     } as unknown as CopilotSettings);
-    expect(out.docProcessorBackend).toBe("plus");
+    expect(out.docProcessorBackend).toBe("miyo");
   });
 
   it("preserves 'miyo'", () => {
@@ -738,6 +763,73 @@ describe("model", () => {
       expect(sanitized.relevantNotesLiveUpdate).toBe(false);
     });
 
+    it("restores independent Agent web defaults for settings written before the fields existed", () => {
+      const withoutAgentWebSettings = { ...DEFAULT_SETTINGS } as unknown as Record<string, unknown>;
+      delete withoutAgentWebSettings.enableAgentWebTools;
+      delete withoutAgentWebSettings.agentWebSearchProvider;
+      delete withoutAgentWebSettings.firecrawlAgentWebApiKey;
+      delete withoutAgentWebSettings.tavilyAgentWebApiKey;
+      delete withoutAgentWebSettings.exaAgentWebApiKey;
+      delete withoutAgentWebSettings.customAgentWebApiKey;
+      delete withoutAgentWebSettings.customAgentWebBaseUrl;
+
+      const sanitized = sanitizeSettings(withoutAgentWebSettings as unknown as CopilotSettings);
+
+      expect(sanitized.enableAgentWebTools).toBe(false);
+      expect(sanitized.agentWebSearchProvider).toBe("firecrawl");
+      expect(sanitized.firecrawlAgentWebApiKey).toBe("");
+      expect(sanitized.tavilyAgentWebApiKey).toBe("");
+      expect(sanitized.exaAgentWebApiKey).toBe("");
+      expect(sanitized.customAgentWebApiKey).toBe("");
+      expect(sanitized.customAgentWebBaseUrl).toBe("");
+    });
+
+    it("preserves Tavily selection and independent keys across reload", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentWebSearchProvider: "tavily",
+        tavilyAgentWebApiKey: "tvly-fixture",
+        firecrawlAgentWebApiKey: "fc-fixture",
+      });
+      expect(sanitized.agentWebSearchProvider).toBe("tavily");
+      expect(sanitized.tavilyAgentWebApiKey).toBe("tvly-fixture");
+      expect(sanitized.firecrawlAgentWebApiKey).toBe("fc-fixture");
+    });
+
+    it.each(["exa", "custom"] as const)(
+      "preserves %s configuration and isolates each saved credential",
+      (provider) => {
+        const result = sanitizeSettings({
+          ...DEFAULT_SETTINGS,
+          agentWebSearchProvider: provider,
+          exaAgentWebApiKey: "exa-key",
+          customAgentWebApiKey: "custom-key",
+          customAgentWebBaseUrl: "https://search.example.com/api",
+        });
+        expect(result.agentWebSearchProvider).toBe(provider);
+        expect(result.exaAgentWebApiKey).toBe("exa-key");
+        expect(result.customAgentWebApiKey).toBe("custom-key");
+        expect(result.customAgentWebBaseUrl).toBe("https://search.example.com/api");
+        expect(result.firecrawlAgentWebApiKey).toBe("");
+      }
+    );
+
+    it("restores safe defaults for unknown providers and non-string Tavily keys", () => {
+      const sanitized = sanitizeSettings({
+        ...DEFAULT_SETTINGS,
+        agentWebSearchProvider: "invalid",
+        tavilyAgentWebApiKey: 42,
+        exaAgentWebApiKey: 42,
+        customAgentWebApiKey: 42,
+        customAgentWebBaseUrl: 42,
+      } as unknown as CopilotSettings);
+      expect(sanitized.agentWebSearchProvider).toBe("firecrawl");
+      expect(sanitized.tavilyAgentWebApiKey).toBe("");
+      expect(sanitized.exaAgentWebApiKey).toBe("");
+      expect(sanitized.customAgentWebApiKey).toBe("");
+      expect(sanitized.customAgentWebBaseUrl).toBe("");
+    });
+
     it("drops a persisted global output cap so it cannot truncate answers again (https://github.com/logancyang/obsidian-copilot-preview/issues/312)", () => {
       const withRetiredCap = {
         ...DEFAULT_SETTINGS,
@@ -782,15 +874,6 @@ describe("model", () => {
       } as unknown as CopilotSettings);
 
       expect(out.defaultChainType).toBe(DEFAULT_SETTINGS.defaultChainType);
-    });
-
-    it("keeps a defaultChainType the runner still supports", () => {
-      const out = sanitizeSettings({
-        ...DEFAULT_SETTINGS,
-        defaultChainType: ChainType.COPILOT_PLUS_CHAIN,
-      });
-
-      expect(out.defaultChainType).toBe(ChainType.COPILOT_PLUS_CHAIN);
     });
 
     it("defaults to the historical root when empty", () => {
@@ -1124,7 +1207,6 @@ describe("model", () => {
       settingsStore.set(settingsAtom, {
         ...DEFAULT_SETTINGS,
         openAIApiKey: "valid-key",
-        plusLicenseKey: "lic-12345",
         anthropicApiKey: null as unknown as string,
         googleApiKey: undefined as unknown as string,
       });
@@ -1133,7 +1215,6 @@ describe("model", () => {
 
       const after = settingsStore.get(settingsAtom);
       expect(after.openAIApiKey).toBe("valid-key");
-      expect(after.plusLicenseKey).toBe("lic-12345");
       expect(after.anthropicApiKey).toBe(DEFAULT_SETTINGS.anthropicApiKey);
       expect(after.googleApiKey).toBe(DEFAULT_SETTINGS.googleApiKey);
     });
@@ -1153,52 +1234,6 @@ describe("model", () => {
       resetSettings();
 
       expect(settingsStore.get(settingsAtom)).toMatchObject(vendorConfig);
-    });
-
-    it("drops the entitlement token, whose identity binding reset invalidates (https://github.com/logancyang/obsidian-copilot-preview/issues/259)", () => {
-      // Reason: `verifyEntitlement` checks the token against `settings.userId`,
-      // and reset replaces that with a fresh uuid — a carried-over token could
-      // never verify again. `plusLicenseKey` is the credential worth keeping;
-      // the next license check re-issues the token from it.
-      settingsStore.set(settingsAtom, {
-        ...DEFAULT_SETTINGS,
-        plusLicenseKey: "lic-12345",
-        entitlementToken: "test-stale-entitlement-token",
-      });
-
-      resetSettings();
-
-      const after = settingsStore.get(settingsAtom);
-      expect(after.plusLicenseKey).toBe("lic-12345");
-      expect(after.entitlementToken).toBe(DEFAULT_SETTINGS.entitlementToken);
-    });
-
-    it("keeps a signed-in user's paid state so reset never reads as sign-out (https://github.com/logancyang/obsidian-copilot-preview/issues/259)", () => {
-      // Reason: the settings subscriber treats an `isPaidUser` flip as
-      // sign-out and tears down the Plus provider, its models, and its
-      // keychain entry — destroying exactly what reset preserves. The strict
-      // `isPlusUser` flag still resets: its proof (the entitlement token) is
-      // dropped, and the next validation re-derives it.
-      settingsStore.set(settingsAtom, {
-        ...DEFAULT_SETTINGS,
-        isPaidUser: true,
-        isPlusUser: true,
-        plusLicenseKey: "lic-12345",
-        entitlementToken: "test-stale-entitlement-token",
-        entitlementExpiresAt: 4_000_000_000_000,
-      });
-
-      resetSettings();
-
-      const after = settingsStore.get(settingsAtom);
-      expect(after.isPaidUser).toBe(true);
-      // The expiry travels with the paid flag: it is tighten-only, and
-      // zeroing it would leave the license UI showing Active forever while
-      // offline.
-      expect(after.entitlementExpiresAt).toBe(4_000_000_000_000);
-      expect(after.plusLicenseKey).toBe("lic-12345");
-      expect(after.isPlusUser).toBe(DEFAULT_SETTINGS.isPlusUser);
-      expect(after.entitlementToken).toBe(DEFAULT_SETTINGS.entitlementToken);
     });
 
     it("drops a bundle value whose type its consumer cannot handle (https://github.com/logancyang/obsidian-copilot-preview/issues/259)", () => {

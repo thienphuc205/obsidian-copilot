@@ -1,5 +1,6 @@
 import { LLM_TIMEOUT_MS } from "@/constants";
 import { TimeoutError } from "@/error";
+import { resolveLocalAwareTimeout } from "@/modelManagement";
 import { logError, logInfo, logWarn } from "@/logger";
 import { extractTagsFromQuery } from "@/search/v3/utils/tagUtils";
 import { withSuppressedTokenWarnings, withTimeout } from "@/utils";
@@ -118,9 +119,11 @@ Format:
    */
   private async expandWithTimeout(query: string): Promise<ExpandedQuery> {
     try {
+      // Local models are slow; the cloud timeout must not kill expansion.
+      const timeout = await resolveLocalAwareTimeout(this.config.timeout);
       return await withTimeout(
         (signal) => this.expandWithLLM(query, signal),
-        this.config.timeout,
+        timeout,
         "Query expansion"
       );
     } catch (error: unknown) {

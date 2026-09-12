@@ -18,13 +18,13 @@ import {
 } from "@/aiParams";
 import { CustomCommandManager } from "@/commands/customCommandManager";
 import { getCachedCustomCommands } from "@/commands/state";
+import { promptForResearchTopic, scaffoldResearchNote } from "@/commands/researchCommands";
 import ChatInput, { type ChatInputProps } from "@/components/chat-components/ChatInput";
-import { EMPTY_AGENT_MENTION_BRANDS } from "@/components/chat-components/hooks/useAtMentionCategories";
 import { useActiveWebTabState } from "@/components/chat-components/hooks/useActiveWebTabState";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ACTIVE_WEB_TAB_MARKER, EVENT_NAMES } from "@/constants";
 import { cn } from "@/lib/utils";
-import { useCanUseMultiAgent } from "@/plusUtils";
 import { EventTargetContext } from "@/context";
 import { logError, logWarn } from "@/logger";
 import {
@@ -46,7 +46,7 @@ import { getModelKeyFromModel } from "@/settings/model";
 import { modelSupportsVision } from "@/utils";
 import { arrayBufferToBase64 } from "@/utils/base64";
 import { mergeWebTabContexts } from "@/utils/urlNormalization";
-import { Clock, X } from "lucide-react";
+import { Clock, Telescope, X } from "lucide-react";
 import { App, Notice, TFile } from "obsidian";
 import React, { memo, useCallback, useContext, useEffect, useMemo, useRef } from "react";
 import { v4 as uuidv4 } from "uuid";
@@ -119,6 +119,12 @@ const dedupeBy = <T,>(items: Iterable<T>, key: (item: T) => string): T[] => {
   }
   return out;
 };
+
+const RESEARCH_ACTION_LABEL = "Research";
+
+/** Prompt seeded into the composer after a research quick action scaffold. */
+const researchPrompt = (topic: string): string =>
+  `Use the research skill for: ${topic}. Show the plan first, search the vault before the web, and write the result into the research note you create.`;
 
 const buildMessageContext = (
   notes: TFile[],
@@ -218,16 +224,11 @@ export const AgentChatInput = memo(function AgentChatInput({
 
   const previousChatInputIdRef = useRef(chatInputId);
 
-  // The `@agent` typeahead group + pills are paid-only. Reactive so a settings
-  // change flips the gate live; the authoritative send-time check is separate.
-  const canUseMultiAgent = useCanUseMultiAgent();
-
   // Installed agents the user can `@`-mention; tracks settings *and* async
   // readiness (compatibility probes settle without a settings write).
   const installedAgentBrands = useInstalledAgentBrands(plugin);
-  // Entitlement-gated typeahead list: free users get the frozen empty list so the
-  // "Agents" group never renders. Both operands are stable refs (no memo needed).
-  const agentBrands = canUseMultiAgent ? installedAgentBrands : EMPTY_AGENT_MENTION_BRANDS;
+  // The `@agent` typeahead always lists the installed agents.
+  const agentBrands = installedAgentBrands;
   // The send-time allowlist is the REAL installed set, INDEPENDENT of the gated
   // typeahead list: a pasted pill (or a stale-false cache) must still resolve to a
   // real answerer so the turn fans out and hits the authoritative entitlement check.
@@ -531,11 +532,41 @@ export const AgentChatInput = memo(function AgentChatInput({
     };
   }, [eventTarget, handleStopGenerating]);
 
+  const handleResearchAction = useCallback(async () => {
+    const topic = await promptForResearchTopic(app);
+    if (typeof topic !== "string" || topic.trim().length === 0) return;
+    const trimmed = topic.trim();
+    const prompt = researchPrompt(trimmed);
+    // Seed the composer draft (the controlled value LexicalEditor syncs), so
+    // the user can review or edit the prompt before sending it themselves.
+    const existing = inputMessage.trim();
+    setInputMessage(existing.length > 0 ? `${existing}\n\n${prompt}` : prompt);
+    void scaffoldResearchNote(plugin, trimmed, { quiet: true });
+  }, [app, plugin, inputMessage, setInputMessage]);
+
   return (
     <>
       {queuedMessages.length > 0 && (
         <QueuedMessageList messages={queuedMessages} onRemove={handleRemoveQueuedMessage} />
       )}
+      <div className="tw-flex tw-justify-end tw-px-1 tw-pb-0.5">
+        <TooltipProvider delayDuration={0}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost2"
+                size="icon"
+                title={RESEARCH_ACTION_LABEL}
+                disabled={disabled}
+                onClick={safeAsyncHandler(handleResearchAction)}
+              >
+                <Telescope className="tw-size-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{RESEARCH_ACTION_LABEL}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      </div>
       <div
         className={
           hasPendingPlanPermission || disabled ? "tw-pointer-events-none tw-opacity-50" : undefined

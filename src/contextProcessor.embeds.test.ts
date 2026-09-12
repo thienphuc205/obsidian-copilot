@@ -1,8 +1,17 @@
 import { ContextProcessor } from "@/contextProcessor";
 import type { FileParserManager } from "@/tools/FileParserManager";
 import { EMBEDDED_NOTE_TAG } from "@/constants";
-import { ChainType } from "@/chainType";
+import type { SourceReference } from "@/context/sourceReferences";
 import { TFile, Vault } from "obsidian";
+
+// FileParserManager (a type-only import here, but the runtime chain through the
+// context processor still pulls "@/utils"); the real module is out of this
+// suite's scope, so stub the functions the reachable paths need at require time.
+jest.mock("@/utils", () => ({
+  err2String: (error: unknown) => String(error),
+  withTimeout: <T>(promise: Promise<T>) => promise,
+  ensureFolderExists: jest.fn(async () => undefined),
+}));
 
 type FileCacheMap = Record<string, unknown>;
 type FileContentMap = Record<string, string>;
@@ -78,8 +87,7 @@ describe("ContextProcessor - Embedded Notes", () => {
       vault,
       [source],
       false,
-      null,
-      ChainType.LLM_CHAIN
+      null
     );
 
     expect(result).toContain(`<${EMBEDDED_NOTE_TAG}>`);
@@ -113,8 +121,7 @@ describe("ContextProcessor - Embedded Notes", () => {
       vault,
       [source],
       false,
-      null,
-      ChainType.LLM_CHAIN
+      null
     );
 
     expect(result).toContain("<heading>Section</heading>");
@@ -147,8 +154,7 @@ describe("ContextProcessor - Embedded Notes", () => {
       vault,
       [source],
       false,
-      null,
-      ChainType.LLM_CHAIN
+      null
     );
 
     expect(result).toContain("<block_id>block-ref</block_id>");
@@ -169,8 +175,7 @@ describe("ContextProcessor - Embedded Notes", () => {
       vault,
       [source],
       false,
-      null,
-      ChainType.LLM_CHAIN
+      null
     );
 
     expect(result).toContain("<content>");
@@ -188,10 +193,101 @@ describe("ContextProcessor - Embedded Notes", () => {
       vault,
       [source],
       false,
-      null,
-      ChainType.LLM_CHAIN
+      null
     );
 
     expect(result).toContain("<error>Embedded note not found</error>");
+  });
+
+  describe("PDF context sources", () => {
+    it("uses the source-aware parser once and forwards its page sources", async () => {
+      const pdf = createMockFile("Paper.pdf");
+      const pageSource: SourceReference = {
+        title: "Paper.pdf — page 2",
+        path: pdf.path,
+        score: 0,
+        page: 2,
+      };
+      const parser = fileParserManager as {
+        supportsExtension: jest.Mock;
+        parseFile: jest.Mock;
+        parseFileWithSources?: jest.Mock;
+      };
+      parser.supportsExtension.mockReturnValue(true);
+      parser.parseFileWithSources = jest.fn().mockResolvedValue({
+        content: "PDF page text",
+        sources: [pageSource],
+      });
+      const onSources = jest.fn();
+
+      const result = await contextProcessor.processContextNotes(
+        new Set(),
+        fileParserManager as FileParserManager,
+        vault,
+        [pdf],
+        false,
+        null,
+        onSources
+      );
+
+      expect(result).toContain("PDF page text");
+      expect(parser.parseFileWithSources).toHaveBeenCalledTimes(1);
+      expect(parser.parseFileWithSources).toHaveBeenCalledWith(pdf, vault);
+      expect(parser.parseFile).not.toHaveBeenCalled();
+      expect(onSources).toHaveBeenCalledWith([pageSource]);
+    });
+
+    it("keeps legacy PDF parsing text-only without fabricating sources", async () => {
+      const pdf = createMockFile("Legacy.pdf");
+      registerFile(pdf, "Legacy PDF text");
+      const parser = fileParserManager as {
+        supportsExtension: jest.Mock;
+        parseFile: jest.Mock;
+        parseFileWithSources?: jest.Mock;
+      };
+      parser.supportsExtension.mockReturnValue(true);
+      const onSources = jest.fn();
+
+      const result = await contextProcessor.processContextNotes(
+        new Set(),
+        fileParserManager as FileParserManager,
+        vault,
+        [pdf],
+        false,
+        null,
+        onSources
+      );
+
+      expect(result).toContain("Legacy PDF text");
+      expect(parser.parseFile).toHaveBeenCalledWith(pdf, vault);
+      expect(onSources).not.toHaveBeenCalled();
+    });
+
+    it("does not forward page sources when source-aware PDF parsing fails", async () => {
+      const pdf = createMockFile("Broken.pdf");
+      const parser = fileParserManager as {
+        supportsExtension: jest.Mock;
+        parseFile: jest.Mock;
+        parseFileWithSources?: jest.Mock;
+      };
+      parser.supportsExtension.mockReturnValue(true);
+      parser.parseFileWithSources = jest.fn().mockRejectedValue(new Error("parse failed"));
+      const onSources = jest.fn();
+
+      const result = await contextProcessor.processContextNotes(
+        new Set(),
+        fileParserManager as FileParserManager,
+        vault,
+        [pdf],
+        false,
+        null,
+        onSources
+      );
+
+      expect(result).toContain("<note_context_error>");
+      expect(parser.parseFileWithSources).toHaveBeenCalledTimes(1);
+      expect(parser.parseFile).not.toHaveBeenCalled();
+      expect(onSources).not.toHaveBeenCalled();
+    });
   });
 });

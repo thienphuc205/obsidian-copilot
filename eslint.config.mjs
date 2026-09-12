@@ -146,11 +146,16 @@ export default [
       "node_modules/**",
       "main.js",
       "styles.css",
+      // PDF.js output is generated from the pinned package; authored host, asset-build,
+      // and archive code remains linted, while asset tests enforce its hashes and licenses.
+      "pdfjs/**",
       "dev/gallery/main.js",
       "dev/gallery/styles.css",
       "data.json",
       "designdocs/**",
       "docs/**",
+      // Workspace-local validation fixtures and logs are not plugin source.
+      "work/**",
       ".claude/**",
     ],
   },

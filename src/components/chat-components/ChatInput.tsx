@@ -1,9 +1,8 @@
-import { useChainType, useModelKey } from "@/aiParams";
+import { useModelKey } from "@/aiParams";
 import { Button } from "@/components/ui/button";
 import { ModelSelector, type ModelSelectorEntry } from "@/components/ui/ModelSelector";
 import { useSettingsValue } from "@/settings/model";
 import type { CopilotMode } from "@/agentMode";
-import { isPlusChain } from "@/utils";
 import {
   mergeWebTabContexts,
   normalizeUrlString,
@@ -264,7 +263,6 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
   const lexicalEditorRef = useRef<LexicalEditorType | null>(null);
   const [currentModelKey, setCurrentModelKey] = useModelKey();
   const settings = useSettingsValue();
-  const [currentChain] = useChainType();
   const [currentActiveNote, setCurrentActiveNote] = useState<TFile | null>(() => {
     const activeFile = app.workspace.getActiveFile();
     return isAllowedFileForNoteContext(activeFile) ? activeFile : null;
@@ -273,8 +271,7 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
   const [urlsFromPills, setUrlsFromPills] = useState<string[]>([]);
   const [foldersFromPills, setFoldersFromPills] = useState<string[]>([]);
   const [webTabsFromPills, setWebTabsFromPills] = useState<WebTabContext[]>([]);
-  const isCopilotPlus = isPlusChain(currentChain);
-  const showAtMentionTools = shouldShowAtMentionTools({ isCopilotPlus, isAgentMode });
+  const showAtMentionTools = shouldShowAtMentionTools({ isAgentMode });
 
   // Merge badge-only contextWebTabs with pills-derived webTabsFromPills for display
   // Uses shared normalization policy from urlNormalization.ts
@@ -318,17 +315,6 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
     // Active Web Tab is handled by ChatManager.
     const webTabsFromEditor = getWebTabsFromEditorSnapshot();
     const allWebTabs = mergeWebTabContexts([...contextWebTabs, ...webTabsFromEditor]);
-
-    if (!isCopilotPlus) {
-      // Non-Plus chains: only webTabs needs explicit passing
-      // - contextNotes: Chat.tsx has state, closure can access
-      // - contextFolders: {folderPath} in text gets expanded by processPrompt()
-      // - webTabs: passed here, Active Web Tab injected by ChatManager
-      handleSendMessage({
-        webTabs: allWebTabs,
-      });
-      return;
-    }
 
     handleSendMessage({
       contextNotes,
@@ -648,21 +634,16 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
   // Pill state is owned by the Lexical editor; absorb new entries into our context arrays
   // without removing user-added ones (removal is handled in the dedicated handlers above).
   useEffect(() => {
-    if (isPlusChain(currentChain)) {
-      // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- merge pill URLs into user-owned context without removing manual entries
-      setContextUrls((prev) => {
-        const contextUrlSet = new Set(prev);
-        const newUrlsFromPills = urlsFromPills.filter((pillUrl) => !contextUrlSet.has(pillUrl));
-        if (newUrlsFromPills.length > 0) {
-          return Array.from(new Set([...prev, ...newUrlsFromPills]));
-        }
-        return prev;
-      });
-    } else {
-      // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- clear Plus-only URL context when switching chains
-      setContextUrls([]);
-    }
-  }, [urlsFromPills, currentChain]);
+    // eslint-disable-next-line @eslint-react/hooks-extra/no-direct-set-state-in-use-effect -- merge pill URLs into user-owned context without removing manual entries
+    setContextUrls((prev) => {
+      const contextUrlSet = new Set(prev);
+      const newUrlsFromPills = urlsFromPills.filter((pillUrl) => !contextUrlSet.has(pillUrl));
+      if (newUrlsFromPills.length > 0) {
+        return Array.from(new Set([...prev, ...newUrlsFromPills]));
+      }
+      return prev;
+    });
+  }, [urlsFromPills]);
 
   // Pill state is owned by the Lexical editor; absorb new entries into context folders
   // without removing user-added ones (removal is handled in handleFolderPillsRemoved).
@@ -824,9 +805,9 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
               onNotesRemoved={handleNotePillsRemoved}
               onActiveNoteAdded={handleActiveNoteAdded}
               onActiveNoteRemoved={handleActiveNoteRemoved}
-              onURLsChange={isCopilotPlus ? setUrlsFromPills : undefined}
-              onURLsRemoved={isCopilotPlus ? handleURLPillsRemoved : undefined}
-              onToolsChange={isCopilotPlus ? onToolPillsChange : undefined}
+              onURLsChange={isAgentMode ? undefined : setUrlsFromPills}
+              onURLsRemoved={isAgentMode ? undefined : handleURLPillsRemoved}
+              onToolsChange={isAgentMode ? undefined : onToolPillsChange}
               onFoldersChange={setFoldersFromPills}
               onFoldersRemoved={handleFolderPillsRemoved}
               onWebTabsChange={setWebTabsFromPills}
@@ -840,10 +821,8 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
               onTagSelected={onTagSelected}
               placeholder={placeholder}
               placeholderPrompts={placeholderPrompts}
-              isCopilotPlus={isCopilotPlus}
               showTools={showAtMentionTools}
               currentActiveFile={currentActiveNote}
-              currentChain={currentChain}
               onEscape={onEscape}
               onShiftTab={onShiftTab}
             />
@@ -870,7 +849,6 @@ const ChatInput = React.forwardRef<ChatInputHandle, ChatInputProps>(function Cha
           {!editMode && (
             <AddContextButton
               onSelect={handleAddToContext}
-              isCopilotPlus={isCopilotPlus}
               showTools={showAtMentionTools}
               currentActiveFile={currentActiveNote}
               lexicalEditorRef={lexicalEditorRef}

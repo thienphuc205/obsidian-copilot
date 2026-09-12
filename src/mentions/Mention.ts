@@ -1,15 +1,8 @@
 import { ImageProcessor } from "@/imageProcessing/imageProcessor";
-import {
-  BrevilabsClient,
-  Twitter4llmResponse,
-  Url4llmResponse,
-} from "@/LLMProviders/brevilabsClient";
 import { Vault } from "obsidian";
 import { selfHostYoutube4llm } from "@/LLMProviders/selfHostServices";
 import { err2String, isTwitterUrl, isYoutubeUrl } from "@/utils";
 import { logError } from "@/logger";
-import { isSelfHostModeValid } from "@/plusUtils";
-import { getSettings } from "@/settings/model";
 import { extractUrlsFromText } from "@/utils/urlTagUtils";
 
 export interface MentionData {
@@ -22,11 +15,9 @@ export interface MentionData {
 export class Mention {
   private static instance: Mention;
   private mentions: Map<string, MentionData>;
-  private brevilabsClient: BrevilabsClient;
 
   private constructor() {
     this.mentions = new Map();
-    this.brevilabsClient = BrevilabsClient.getInstance();
   }
 
   static getInstance(): Mention {
@@ -40,22 +31,22 @@ export class Mention {
     return extractUrlsFromText(text);
   }
 
-  async processUrl(url: string): Promise<Url4llmResponse & { error?: string }> {
-    try {
-      return await this.brevilabsClient.url4llm(url);
-    } catch (error) {
-      const msg = err2String(error);
-      logError(`Error processing URL ${url}: ${msg}`);
-      return { response: url, elapsed_time_ms: 0, error: msg };
-    }
+  /**
+   * Legacy URL relay processing is removed with the hosted relay; a plain URL
+   * mention therefore surfaces as a processing error using the same error
+   * shape the former catch path produced.
+   */
+  async processUrl(
+    url: string
+  ): Promise<{ response: string; elapsed_time_ms: number; error?: string }> {
+    const msg = "URL processing is not available in this build";
+    logError(`Error processing URL ${url}: ${msg}`);
+    return { response: url, elapsed_time_ms: 0, error: msg };
   }
 
   async processYoutubeUrl(url: string): Promise<{ transcript: string; error?: string }> {
     try {
-      const response =
-        isSelfHostModeValid() && getSettings().supadataApiKey
-          ? await selfHostYoutube4llm(url)
-          : await this.brevilabsClient.youtube4llm(url);
+      const response = await selfHostYoutube4llm(url);
       return { transcript: response.response.transcript };
     } catch (error) {
       const msg = err2String(error);
@@ -64,14 +55,17 @@ export class Mention {
     }
   }
 
-  async processTwitterUrl(url: string): Promise<Twitter4llmResponse & { error?: string }> {
-    try {
-      return await this.brevilabsClient.twitter4llm(url);
-    } catch (error) {
-      const msg = err2String(error);
-      logError(`Error processing Twitter URL ${url}: ${msg}`);
-      return { response: url, elapsed_time_ms: 0, error: msg };
-    }
+  /**
+   * Legacy Twitter relay processing is removed with the hosted relay; a
+   * Twitter/X URL mention therefore surfaces as a processing error using the
+   * same error shape the former catch path produced.
+   */
+  async processTwitterUrl(
+    url: string
+  ): Promise<{ response: string; elapsed_time_ms: number; error?: string }> {
+    const msg = "Twitter/X processing is not available in this build";
+    logError(`Error processing Twitter URL ${url}: ${msg}`);
+    return { response: url, elapsed_time_ms: 0, error: msg };
   }
 
   /**

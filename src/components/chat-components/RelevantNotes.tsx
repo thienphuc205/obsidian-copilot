@@ -24,7 +24,6 @@ import {
 import { onMiyoIndexChanged } from "@/miyo/miyoIndex";
 import { openCopilotSettings } from "@/settings/openSettings";
 import { updateSetting, useSettingsValue } from "@/settings/model";
-import { sha256 } from "@/utils/hash";
 import { Platform, TFile } from "obsidian";
 import React, { memo, useCallback, useEffect, useRef, useState } from "react";
 
@@ -98,7 +97,6 @@ interface UseRelevantNotesOptions {
   enableMiyo: boolean;
   miyoServerUrl: string;
   miyoBackendAvailable: boolean;
-  miyoCredentialIdentity: string;
   /** Whether the reader has live update switched on for the pane. */
   liveUpdateEnabled: boolean;
 }
@@ -107,7 +105,6 @@ function useRelevantNotes({
   enableMiyo,
   miyoServerUrl,
   miyoBackendAvailable,
-  miyoCredentialIdentity,
   liveUpdateEnabled,
 }: UseRelevantNotesOptions) {
   const app = useApp();
@@ -142,13 +139,7 @@ function useRelevantNotes({
   const requestStatus = !activeFilePath ? "idle" : enableMiyo ? "ready" : "disabled";
   const requestKey =
     requestStatus === "ready"
-      ? JSON.stringify([
-          activeFilePath,
-          miyoServerUrl,
-          miyoBackendAvailable,
-          miyoCredentialIdentity,
-          requery.restart,
-        ])
+      ? JSON.stringify([activeFilePath, miyoServerUrl, miyoBackendAvailable, requery.restart])
       : null;
 
   useEffect(() => onMiyoIndexChanged(refresh), [refresh]);
@@ -232,10 +223,6 @@ export const RelevantNotes = memo(
     const activeFile = useActiveFile();
     const settings = useSettingsValue();
     const miyoBackendAvailable = useMiyoStatus().backend === "available";
-    // The request identity must change with credentials without retaining the
-    // credential itself in request state.
-    // https://github.com/Brevilabs/obsidian-copilot-private/issues/280
-    const miyoCredentialIdentity = sha256(settings.plusLicenseKey);
     // Mobile without a remote server cannot reach Miyo at all, so following its
     // index there would only poll a backend every search is refused by.
     // https://github.com/Brevilabs/obsidian-copilot-private/issues/362
@@ -245,7 +232,6 @@ export const RelevantNotes = memo(
       enableMiyo: settings.enableMiyo,
       miyoServerUrl: settings.miyoServerUrl,
       miyoBackendAvailable,
-      miyoCredentialIdentity,
       liveUpdateEnabled,
     });
     // The toolbar must name only a source the search contract accepts; showing

@@ -80,7 +80,6 @@ export interface DocumentRetriever {
 /**
  * Factory for creating retrievers based on current settings.
  * Centralizes the retriever selection logic to avoid duplication across:
- * - CopilotPlusChainRunner (via SearchTools)
  * - Any other components that need search
  *
  * Priority order:

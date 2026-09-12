@@ -1,7 +1,12 @@
 import { FileSystemAdapter, App } from "obsidian";
+import { RequestError } from "@agentclientprotocol/sdk";
+import { logWarn } from "@/logger";
+import { AgentSession } from "@/agentMode/session/AgentSession";
+import { AgentModelPreloader } from "@/agentMode/session/AgentModelPreloader";
+import { MethodUnsupportedError } from "@/agentMode/session/errors";
 import type { BackendDescriptor, PermissionOption } from "@/agentMode/session/types";
 import { AcpBackendProcess } from "./AcpBackendProcess";
-import type { AcpBackend } from "./types";
+import type { AcpBackend, AcpMcpHttpServer } from "./types";
 import type { VaultClient } from "./VaultClient";
 
 jest.mock("@/logger", () => ({
@@ -15,16 +20,24 @@ jest.mock("@/logger", () => ({
 // the `newSession` request. `mock`-prefixed names satisfy ts-jest's jest.mock
 // hoisting rules.
 let mockInitializeResult: unknown = { protocolVersion: 1 };
+let mockInitializeError: Error | null = null;
 const mockNewSession = jest.fn(async (..._args: unknown[]) => ({ sessionId: "test-session" }));
 const mockResumeSession = jest.fn(async (..._args: unknown[]) => ({}));
 const mockLoadSession = jest.fn(async (..._args: unknown[]) => ({}));
+const mockProcessStart = jest.fn(() => ({
+  stdin: new WritableStream<Uint8Array>(),
+  stdout: new ReadableStream<Uint8Array>(),
+}));
+const mockProcessShutdown = jest.fn().mockResolvedValue(undefined);
 
 jest.mock("@agentclientprotocol/sdk", () => {
   class RequestError extends Error {
     code: number;
-    constructor(code: number, message?: string) {
+    data?: unknown;
+    constructor(code: number, message?: string, data?: unknown) {
       super(message);
       this.code = code;
+      this.data = data;
       this.name = "RequestError";
     }
   }
@@ -33,7 +46,10 @@ jest.mock("@agentclientprotocol/sdk", () => {
     constructor(toClient: (c: unknown) => unknown) {
       this._client = toClient(this);
     }
-    initialize = jest.fn(async () => mockInitializeResult);
+    initialize = jest.fn(async () => {
+      if (mockInitializeError) throw mockInitializeError;
+      return mockInitializeResult;
+    });
     newSession = (...args: unknown[]) => mockNewSession(...args);
     resumeSession = (...args: unknown[]) => mockResumeSession(...args);
     loadSession = (...args: unknown[]) => mockLoadSession(...args);
@@ -54,16 +70,13 @@ let mockProcessIsRunning = true;
 
 jest.mock("./AcpProcessManager", () => ({
   AcpProcessManager: jest.fn().mockImplementation(() => ({
-    start: () => ({
-      stdin: new WritableStream<Uint8Array>(),
-      stdout: new ReadableStream<Uint8Array>(),
-    }),
+    start: () => mockProcessStart(),
     onExit: (fn: () => void) => {
       exitListeners.add(fn);
       return () => exitListeners.delete(fn);
     },
     isRunning: () => mockProcessIsRunning,
-    shutdown: jest.fn().mockResolvedValue(undefined),
+    shutdown: mockProcessShutdown,
   })),
 }));
 
@@ -95,6 +108,8 @@ function buildStubDescriptor(overrides: Partial<BackendDescriptor> = {}): Backen
   } as unknown as BackendDescriptor;
 }
 
+type TestSpawnDescriptor = Awaited<ReturnType<AcpBackend["buildSpawnDescriptor"]>>;
+
 /**
  * Pull the VaultClient that AcpBackendProcess wires into the mock
  * ClientSideConnection. The mock stores the `toClient(this)` result on
@@ -111,12 +126,17 @@ describe("AcpBackendProcess", () => {
     exitListeners.clear();
     mockProcessIsRunning = true;
     mockInitializeResult = { protocolVersion: 1 };
+    mockInitializeError = null;
     mockNewSession.mockClear();
     mockNewSession.mockResolvedValue({ sessionId: "test-session" });
     mockResumeSession.mockClear();
     mockResumeSession.mockResolvedValue({});
     mockLoadSession.mockClear();
     mockLoadSession.mockResolvedValue({});
+    mockProcessStart.mockClear();
+    mockProcessShutdown.mockClear();
+    mockProcessShutdown.mockResolvedValue(undefined);
+    (logWarn as jest.Mock).mockClear();
   });
 
   describe("start()", () => {
@@ -135,6 +155,565 @@ describe("AcpBackendProcess", () => {
         vaultBasePath: "/Volumes/Notes/Main Vault",
         vaultName: "Main Vault",
       });
+    });
+
+    it("passes neutral HTTP MCP descriptors to new, resume, and load session requests", async () => {
+      mockInitializeResult = {
+        protocolVersion: 1,
+        agentCapabilities: {
+          loadSession: true,
+          sessionCapabilities: { resume: {} },
+        },
+      };
+      const dispose = jest.fn().mockResolvedValue(undefined);
+      const mcpServer: AcpMcpHttpServer = {
+        type: "http",
+        name: "copilot-web",
+        url: "http://127.0.0.1:43123/mcp",
+        headers: [{ name: "Authorization", value: "Bearer fixture-token" }],
+      };
+      const agentBackend = buildStubBackend({
+        buildSpawnDescriptor: jest.fn().mockResolvedValue({
+          command: "/bin/true",
+          args: [],
+          env: {},
+          mcpServers: [mcpServer],
+          dispose,
+        }),
+      });
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        agentBackend,
+        "1.0.0",
+        buildStubDescriptor()
+      );
+
+      await backend.start();
+      await backend.newSession({ cwd: "/vault" });
+      await backend.resumeSession({ sessionId: "resume-1", cwd: "/vault" });
+      await backend.loadSession({ sessionId: "load-1", cwd: "/vault" });
+
+      const newRequest = mockNewSession.mock.calls[0][0] as { mcpServers: unknown[] };
+      const resumeRequest = mockResumeSession.mock.calls[0][0] as { mcpServers: unknown[] };
+      const loadRequest = mockLoadSession.mock.calls[0][0] as { mcpServers: unknown[] };
+      expect(newRequest.mcpServers).toEqual([mcpServer]);
+      expect(resumeRequest.mcpServers).toEqual([mcpServer]);
+      expect(loadRequest.mcpServers).toEqual([mcpServer]);
+      expect(newRequest.mcpServers[0]).not.toBe(mcpServer);
+      expect(mcpServer).toEqual({
+        type: "http",
+        name: "copilot-web",
+        url: "http://127.0.0.1:43123/mcp",
+        headers: [{ name: "Authorization", value: "Bearer fixture-token" }],
+      });
+
+      await backend.shutdown();
+      expect(dispose).toHaveBeenCalledTimes(1);
+    });
+
+    it("disposes the descriptor when spawning fails", async () => {
+      const dispose = jest.fn().mockResolvedValue(undefined);
+      const agentBackend = buildStubBackend({
+        buildSpawnDescriptor: jest.fn().mockResolvedValue({
+          command: "/bin/true",
+          args: [],
+          env: {},
+          dispose,
+        }),
+      });
+      mockProcessStart.mockImplementationOnce(() => {
+        throw new Error("spawn failed");
+      });
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        agentBackend,
+        "1.0.0",
+        buildStubDescriptor()
+      );
+
+      await expect(backend.start()).rejects.toThrow("spawn failed");
+      expect(exitListeners.size).toBe(0);
+      expect(dispose).toHaveBeenCalledTimes(1);
+      expect(mockProcessShutdown).toHaveBeenCalledTimes(1);
+    });
+
+    it("disposes the descriptor and shuts down once when initialization fails", async () => {
+      const dispose = jest.fn().mockResolvedValue(undefined);
+      const agentBackend = buildStubBackend({
+        buildSpawnDescriptor: jest.fn().mockResolvedValue({
+          command: "/bin/true",
+          args: [],
+          env: {},
+          dispose,
+        }),
+      });
+      mockInitializeError = new Error("initialize failed");
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        agentBackend,
+        "1.0.0",
+        buildStubDescriptor()
+      );
+
+      await expect(backend.start()).rejects.toThrow("initialize failed");
+      expect(exitListeners.size).toBe(0);
+      expect(dispose).toHaveBeenCalledTimes(1);
+      expect(mockProcessShutdown).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not initialize a child that already exited before the handshake", async () => {
+      const dispose = jest.fn().mockResolvedValue(undefined);
+      const agentBackend = buildStubBackend({
+        buildSpawnDescriptor: jest.fn().mockResolvedValue({
+          command: "/bin/true",
+          args: [],
+          env: {},
+          dispose,
+        }),
+      });
+      mockProcessIsRunning = false;
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        agentBackend,
+        "1.0.0",
+        buildStubDescriptor()
+      );
+
+      await expect(backend.start()).rejects.toThrow("exited before initialize");
+      expect(exitListeners.size).toBe(0);
+      expect(dispose).toHaveBeenCalledTimes(1);
+      expect(mockProcessShutdown).toHaveBeenCalledTimes(1);
+    });
+
+    it("disposes the descriptor once on crash and repeated shutdown", async () => {
+      const dispose = jest.fn().mockResolvedValue(undefined);
+      const agentBackend = buildStubBackend({
+        buildSpawnDescriptor: jest.fn().mockResolvedValue({
+          command: "/bin/true",
+          args: [],
+          env: {},
+          dispose,
+        }),
+      });
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        agentBackend,
+        "1.0.0",
+        buildStubDescriptor()
+      );
+
+      await backend.start();
+      mockProcessIsRunning = false;
+      for (const fn of exitListeners) fn();
+      expect(exitListeners.size).toBe(0);
+      expect(dispose).toHaveBeenCalledTimes(1);
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      await backend.shutdown();
+      await backend.shutdown();
+
+      expect(dispose).toHaveBeenCalledTimes(1);
+    });
+
+    it("drops backend exit listeners after a crash", async () => {
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        buildStubBackend(),
+        "1.0.0",
+        buildStubDescriptor()
+      );
+      const listener = jest.fn();
+      backend.onExit(listener);
+
+      await backend.start();
+      mockProcessIsRunning = false;
+      for (const fn of exitListeners) fn();
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect((backend as unknown as { exitListeners: Set<unknown> }).exitListeners.size).toBe(0);
+      await backend.shutdown();
+    });
+
+    it("revokes the bridge before shutting down the child process", async () => {
+      const order: string[] = [];
+      const dispose = jest.fn(async () => {
+        order.push("bridge");
+      });
+      const agentBackend = buildStubBackend({
+        buildSpawnDescriptor: jest.fn().mockResolvedValue({
+          command: "/bin/true",
+          args: [],
+          env: {},
+          dispose,
+        }),
+      });
+      mockProcessShutdown.mockImplementationOnce(async () => {
+        order.push("child");
+      });
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        agentBackend,
+        "1.0.0",
+        buildStubDescriptor()
+      );
+
+      await backend.start();
+      await backend.shutdown();
+
+      expect(exitListeners.size).toBe(0);
+      expect(order).toEqual(["bridge", "child"]);
+    });
+
+    it("rejects a deferred descriptor after shutdown and never adopts a late child", async () => {
+      let resolveDescriptor!: (descriptor: TestSpawnDescriptor) => void;
+      const descriptorReady = new Promise<TestSpawnDescriptor>((resolve) => {
+        resolveDescriptor = resolve;
+      });
+      const dispose = jest.fn().mockResolvedValue(undefined);
+      const agentBackend = buildStubBackend({
+        buildSpawnDescriptor: jest.fn(async () => descriptorReady),
+      });
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        agentBackend,
+        "1.0.0",
+        buildStubDescriptor()
+      );
+
+      const starting = backend.start();
+      const shuttingDown = backend.shutdown();
+      // Teardown must not wait for an uncancellable descriptor promise.
+      await shuttingDown;
+      resolveDescriptor({
+        command: "/bin/true",
+        args: [],
+        env: {},
+        dispose,
+      });
+
+      await expect(starting).rejects.toThrow("cancelled during shutdown");
+      expect(dispose).toHaveBeenCalledTimes(1);
+      expect(mockProcessStart).not.toHaveBeenCalled();
+      expect(mockProcessShutdown).not.toHaveBeenCalled();
+    });
+
+    it("can explicitly restart while the prior descriptor finishes late", async () => {
+      let resolveFirstDescriptor!: (descriptor: TestSpawnDescriptor) => void;
+      const firstDescriptor = new Promise<TestSpawnDescriptor>((resolve) => {
+        resolveFirstDescriptor = resolve;
+      });
+      const firstDispose = jest.fn().mockResolvedValue(undefined);
+      const secondDispose = jest.fn().mockResolvedValue(undefined);
+      const agentBackend = buildStubBackend({
+        buildSpawnDescriptor: jest.fn().mockReturnValueOnce(firstDescriptor).mockResolvedValueOnce({
+          command: "/bin/true",
+          args: [],
+          env: {},
+          dispose: secondDispose,
+        }),
+      });
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        agentBackend,
+        "1.0.0",
+        buildStubDescriptor()
+      );
+
+      const firstStart = backend.start();
+      await backend.shutdown();
+      await backend.start();
+      expect(mockProcessStart).toHaveBeenCalledTimes(1);
+
+      resolveFirstDescriptor({
+        command: "/bin/true",
+        args: [],
+        env: {},
+        dispose: firstDispose,
+      });
+      await expect(firstStart).rejects.toThrow("cancelled during shutdown");
+      expect(firstDispose).toHaveBeenCalledTimes(1);
+
+      await backend.shutdown();
+      expect(secondDispose).toHaveBeenCalledTimes(1);
+    });
+
+    it("can restart after an explicit shutdown", async () => {
+      const firstDispose = jest.fn().mockResolvedValue(undefined);
+      const secondDispose = jest.fn().mockResolvedValue(undefined);
+      const agentBackend = buildStubBackend({
+        buildSpawnDescriptor: jest
+          .fn()
+          .mockResolvedValueOnce({ command: "/bin/true", args: [], env: {}, dispose: firstDispose })
+          .mockResolvedValueOnce({
+            command: "/bin/true",
+            args: [],
+            env: {},
+            dispose: secondDispose,
+          }),
+      });
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        agentBackend,
+        "1.0.0",
+        buildStubDescriptor()
+      );
+
+      await backend.start();
+      await backend.shutdown();
+      await backend.start();
+
+      expect(mockProcessStart).toHaveBeenCalledTimes(2);
+      expect(mockProcessShutdown).toHaveBeenCalledTimes(1);
+      expect(firstDispose).toHaveBeenCalledTimes(1);
+      expect(secondDispose).not.toHaveBeenCalled();
+
+      await backend.shutdown();
+      expect(mockProcessShutdown).toHaveBeenCalledTimes(2);
+      expect(secondDispose).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("ACP error propagation", () => {
+    it("sanitizes new, resume, and load errors while preserving SDK identity and data", async () => {
+      const token = "acp-error-token-sentinel";
+      mockInitializeResult = {
+        protocolVersion: 1,
+        agentCapabilities: {
+          loadSession: true,
+          sessionCapabilities: { resume: {} },
+        },
+      };
+      const mcpServer: AcpMcpHttpServer = {
+        type: "http",
+        name: "copilot-web",
+        url: "http://127.0.0.1:43123/mcp",
+        headers: [{ name: "Authorization", value: `Bearer ${token}` }],
+      };
+      const agentBackend = buildStubBackend({
+        buildSpawnDescriptor: jest.fn().mockResolvedValue({
+          command: "/bin/true",
+          args: [],
+          env: {},
+          mcpServers: [mcpServer],
+        }),
+      });
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        agentBackend,
+        "1.0.0",
+        buildStubDescriptor()
+      );
+      await backend.start();
+
+      const rawNewError = new RequestError(-32000, `authentication failed: ${token}`, {
+        echoed: token,
+      });
+      mockNewSession.mockRejectedValueOnce(rawNewError);
+      const session = new AgentSession({
+        backend,
+        cwd: "/vault",
+        internalId: "error-session",
+        backendId: "opencode",
+      });
+      let newError: unknown;
+      try {
+        await session.ready;
+      } catch (err) {
+        newError = err;
+      }
+      expect(newError).toBeInstanceOf(RequestError);
+      expect(newError).toMatchObject({ code: -32000, data: { echoed: "<redacted>" } });
+      expect((newError as Error).message).not.toContain(token);
+      expect(rawNewError.message).toContain(token);
+      expect(rawNewError.data).toEqual({ echoed: token });
+
+      const rawResumeError = new RequestError(-32001, `resume failed ${token}`, {
+        echoed: token,
+      });
+      mockResumeSession.mockRejectedValueOnce(rawResumeError);
+      let resumeError: unknown;
+      try {
+        await backend.resumeSession({ sessionId: "resume-1", cwd: "/vault" });
+      } catch (err) {
+        resumeError = err;
+      }
+      expect(resumeError).toBeInstanceOf(RequestError);
+      expect(resumeError).toMatchObject({ code: -32001, data: { echoed: "<redacted>" } });
+      expect((resumeError as Error).message).not.toContain(token);
+      expect(rawResumeError.message).toContain(token);
+      expect(rawResumeError.data).toEqual({ echoed: token });
+
+      const rawLoadError = new RequestError(-32002, `load failed ${token}`, {
+        echoed: token,
+      });
+      mockLoadSession.mockRejectedValueOnce(rawLoadError);
+      let loadError: unknown;
+      try {
+        await backend.loadSession({ sessionId: "load-1", cwd: "/vault" });
+      } catch (err) {
+        loadError = err;
+      }
+      expect(loadError).toBeInstanceOf(RequestError);
+      expect(loadError).toMatchObject({ code: -32002, data: { echoed: "<redacted>" } });
+      expect((loadError as Error).message).not.toContain(token);
+      expect(rawLoadError.message).toContain(token);
+
+      // Drive the same resume/load errors through the production preloader
+      // logger, not a test-only logging shim. The preloader's fallback new
+      // session is intentionally empty; it is only here to finish the probe.
+      mockResumeSession.mockRejectedValueOnce(rawResumeError);
+      mockLoadSession.mockRejectedValueOnce(rawLoadError);
+      const preloadDescriptor = {
+        id: "opencode",
+        displayName: "opencode",
+        getInstallState: jest.fn(() => ({ kind: "ready" })),
+        getProbeSessionId: jest.fn(() => "stored-probe"),
+        createBackendProcess: jest.fn(() => backend),
+      } as unknown as BackendDescriptor;
+      const preloader = new AgentModelPreloader(
+        buildApp(),
+        { manifest: { version: "1.0.0" } } as never,
+        () => preloadDescriptor
+      );
+      await preloader.preload("opencode");
+      const downstreamLogMessages = (logWarn as jest.Mock).mock.calls
+        .map(([message]) => String(message))
+        .join("\n");
+      expect(downstreamLogMessages).toContain("resumed probe session stored-probe failed");
+      expect(downstreamLogMessages).toContain("loaded probe session stored-probe failed");
+      expect(JSON.stringify((logWarn as jest.Mock).mock.calls)).not.toContain(token);
+      expect(mcpServer.headers[0].value).toBe(`Bearer ${token}`);
+
+      await session.dispose();
+      await preloader.shutdown();
+      await backend.shutdown();
+    });
+
+    it("collects COPILOT_PLUS_LICENSE_KEY from the descriptor for ACP boundary redaction", async () => {
+      const token = "plus-license-error-token-sentinel";
+      const agentBackend = buildStubBackend({
+        buildSpawnDescriptor: jest.fn().mockResolvedValue({
+          command: "/bin/true",
+          args: [],
+          env: { COPILOT_PLUS_LICENSE_KEY: token },
+        }),
+      });
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        agentBackend,
+        "1.0.0",
+        buildStubDescriptor()
+      );
+      await backend.start();
+
+      const rawError = new RequestError(-32003, `provider echoed ${token}`, {
+        licenseKey: token,
+      });
+      mockNewSession.mockRejectedValueOnce(rawError);
+
+      let safeError: unknown;
+      try {
+        await backend.newSession({ cwd: "/vault" });
+      } catch (error) {
+        safeError = error;
+      }
+
+      expect(safeError).toBeInstanceOf(RequestError);
+      expect(safeError).toMatchObject({
+        code: -32003,
+        data: { licenseKey: "<redacted>" },
+      });
+      expect((safeError as Error).message).not.toContain(token);
+      expect(rawError.message).toContain(token);
+      expect(rawError.data).toEqual({ licenseKey: token });
+
+      await backend.shutdown();
+    });
+
+    it("preserves method-unsupported control flow after sanitizing the SDK error", async () => {
+      mockInitializeResult = {
+        protocolVersion: 1,
+        agentCapabilities: { sessionCapabilities: { resume: {} } },
+      };
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        buildStubBackend(),
+        "1.0.0",
+        buildStubDescriptor()
+      );
+      await backend.start();
+      mockResumeSession.mockRejectedValueOnce(new RequestError(-32601, "unsupported"));
+
+      await expect(
+        backend.resumeSession({ sessionId: "unsupported-1", cwd: "/vault" })
+      ).rejects.toBeInstanceOf(MethodUnsupportedError);
+      await backend.shutdown();
+    });
+  });
+
+  describe("lifecycle generation", () => {
+    it("drops a late successful RPC after shutdown and allows the next generation to write state", async () => {
+      let resolveOld!: (response: { sessionId: string }) => void;
+      const oldResponse = new Promise<{ sessionId: string }>((resolve) => {
+        resolveOld = resolve;
+      });
+      mockNewSession
+        .mockImplementationOnce(() => oldResponse)
+        .mockResolvedValueOnce({ sessionId: "new-session" });
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        buildStubBackend(),
+        "1.0.0",
+        buildStubDescriptor()
+      );
+      await backend.start();
+
+      const oldRequest = backend.newSession({ cwd: "/vault" });
+      expect(mockNewSession).toHaveBeenCalledTimes(1);
+
+      await backend.shutdown();
+      await backend.start();
+
+      resolveOld({ sessionId: "old-session" });
+      await expect(oldRequest).rejects.toThrow("lifecycle changed");
+
+      const newResponse = await backend.newSession({ cwd: "/vault" });
+      expect(newResponse.sessionId).toBe("new-session");
+      const wireState = (backend as unknown as { sessionWireState: Map<string, unknown> })
+        .sessionWireState;
+      expect(wireState.has("old-session")).toBe(false);
+      expect(wireState.has("new-session")).toBe(true);
+
+      await backend.shutdown();
+    });
+
+    it("does not let a late capability success repopulate the next generation", async () => {
+      mockInitializeResult = {
+        protocolVersion: 1,
+        agentCapabilities: { sessionCapabilities: { resume: {} } },
+      };
+      let resolveOld!: (response: Record<string, never>) => void;
+      const oldResponse = new Promise<Record<string, never>>((resolve) => {
+        resolveOld = resolve;
+      });
+      mockResumeSession.mockImplementationOnce(() => oldResponse);
+      const backend = new AcpBackendProcess(
+        buildApp(),
+        buildStubBackend(),
+        "1.0.0",
+        buildStubDescriptor()
+      );
+      await backend.start();
+      const oldRequest = backend.resumeSession({ sessionId: "old-session", cwd: "/vault" });
+
+      await backend.shutdown();
+      mockInitializeResult = { protocolVersion: 1 };
+      await backend.start();
+
+      resolveOld({});
+      await expect(oldRequest).rejects.toThrow("lifecycle changed");
+      expect(backend.hasCapability("session/resume")).toBe(false);
+
+      await backend.shutdown();
     });
   });
 

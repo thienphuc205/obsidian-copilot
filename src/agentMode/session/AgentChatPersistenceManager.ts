@@ -1,5 +1,21 @@
 import { serializeFanoutComposite } from "@/agentMode/session/fanout/fanoutTypes";
+import {
+  escapeLocalAttachmentMarkerLiteral,
+  parseLocalAttachmentMarkerLiteral,
+  parseLocalAttachmentRefMarker,
+  serializeLocalAttachmentRefs,
+} from "@/agentMode/session/chatAttachmentRefs";
+import {
+  MAX_CHAT_SOURCE_REFS,
+  escapeChatSourceMarkerLiteral,
+  normalizeChatSourceRefs,
+  parseChatSourceMarkerLiteral,
+  parseChatSourceRefMarker,
+  serializeChatSourceRefs,
+  type ChatSourceRef,
+} from "@/agentMode/session/chatSourceRefs";
 import { AGENT_CHAT_MODE, AI_SENDER, COPILOT_CONVERSATION_TAG, USER_SENDER } from "@/constants";
+import type { SourceReference } from "@/context/sourceReferences";
 import { logError, logInfo, logWarn } from "@/logger";
 import { getSettings } from "@/settings/model";
 import { getEffectiveConversationsFolder } from "@/settings/copilotFolder";
@@ -229,8 +245,9 @@ export class AgentChatPersistenceManager {
 
   /**
    * Parse a saved agent chat file back into `AgentChatMessage`s and routing
-   * info. Tool/plan/thought parts are not restored — the markdown format only
-   * preserves sender + text (display-only history, mirroring legacy mode).
+   * info. Tool/plan/thought parts are not restored — the markdown format
+   * preserves sender + text plus optional bounded attachment and source
+   * metadata markers (display-only history, mirroring legacy mode).
    */
   async loadFile(file: TFile): Promise<LoadedAgentChat> {
     let content: string;
@@ -339,7 +356,21 @@ export class AgentChatPersistenceManager {
           m.message.length === 0 && m.fanout
             ? serializeFanoutComposite(m.fanout, (id) => id)
             : m.message;
-        return `**${m.sender}**: ${body}\n[Timestamp: ${ts}]`;
+        const escapedBody = body
+          .split("\n")
+          .map((line) => escapeChatSourceMarkerLiteral(escapeLocalAttachmentMarkerLiteral(line)))
+          .join("\n");
+        const attachmentMarker = serializeLocalAttachmentRefs(m.localAttachmentRefs);
+        const sourceMarker =
+          m.sender === AI_SENDER ? serializeChatSourceRefs(collectMessageSourceRefs(m)) : null;
+        const metadataMarkers = [attachmentMarker, sourceMarker].filter(
+          (marker): marker is string => marker !== null
+        );
+        const bodyWithMetadata =
+          metadataMarkers.length > 0
+            ? `${escapedBody}\n${metadataMarkers.join("\n")}`
+            : escapedBody;
+        return `**${m.sender}**: ${bodyWithMetadata}\n[Timestamp: ${ts}]`;
       })
       .join("\n\n");
   }
@@ -365,7 +396,37 @@ export class AgentChatPersistenceManager {
         }
       }
 
-      const messageText = lines.slice(0, endIndex).join("\n").trim();
+      const messageLines = lines.slice(0, endIndex);
+      let localAttachmentRefs: ReturnType<typeof parseLocalAttachmentRefMarker> = null;
+      let sourceReferences: ReturnType<typeof parseChatSourceRefMarker> = null;
+      // Metadata markers are written in a stable order, but accept either
+      // order so a future writer can add/remove one without stranding the
+      // other as visible transcript text. Each marker is consumed at most once.
+      while (messageLines.length > 0) {
+        const trailingLine = messageLines.at(-1);
+        if (!sourceReferences && sender === AI_SENDER) {
+          sourceReferences = parseChatSourceRefMarker(trailingLine);
+          if (sourceReferences) {
+            messageLines.pop();
+            continue;
+          }
+        }
+        if (!localAttachmentRefs) {
+          localAttachmentRefs = parseLocalAttachmentRefMarker(trailingLine);
+          if (localAttachmentRefs) {
+            messageLines.pop();
+            continue;
+          }
+        }
+        break;
+      }
+      const messageText = messageLines
+        .map(
+          (line) =>
+            parseChatSourceMarkerLiteral(line) ?? parseLocalAttachmentMarkerLiteral(line) ?? line
+        )
+        .join("\n")
+        .trim();
 
       let timestamp: FormattedDateTime | null = null;
       if (timestampStr !== "Unknown time") {
@@ -391,6 +452,10 @@ export class AgentChatPersistenceManager {
         sender,
         isVisible: true,
         timestamp,
+        ...(localAttachmentRefs ? { localAttachmentRefs } : {}),
+        ...(sourceReferences
+          ? { sourceReferences: toDisplaySourceReferences(sourceReferences) }
+          : {}),
       });
     }
     return messages;
@@ -532,4 +597,72 @@ export class AgentChatPersistenceManager {
     lines.push(args.chatContent);
     return lines.join("\n");
   }
+}
+
+/**
+ * Gather display-only citations from a restored message and completed live
+ * web tool calls. Invalid references are skipped independently so one bad
+ * provider item cannot erase otherwise valid citations; the codec still owns
+ * URL policy, field projection, deduplication, and byte bounds.
+ */
+function collectMessageSourceRefs(message: AgentChatMessage): readonly ChatSourceRef[] {
+  const candidates = [
+    ...(message.sourceReferences ?? []),
+    ...(message.parts ?? []).flatMap((part) =>
+      part.kind === "tool_call" && part.status === "completed" ? (part.sourceReferences ?? []) : []
+    ),
+  ];
+  const collected: ChatSourceRef[] = [];
+  const seenUrls = new Set<string>();
+
+  for (const candidate of candidates) {
+    // A multibyte excerpt can overflow the envelope even on a single source.
+    const normalized =
+      normalizeChatSourceRefs([candidate])[0] ??
+      normalizeChatSourceRefs([
+        { title: candidate?.title, url: candidate?.url, kind: candidate?.kind },
+      ])[0];
+    if (!normalized || seenUrls.has(normalized.url)) continue;
+    seenUrls.add(normalized.url);
+    collected.push(normalized);
+    if (collected.length === MAX_CHAT_SOURCE_REFS) break;
+  }
+
+  if (serializeChatSourceRefs(collected) !== null) return collected;
+
+  // Snippets are useful but optional; remove them before sacrificing ordered
+  // citations when the aggregate metadata envelope exceeds the codec bound.
+  const withoutSnippets = collected.map(({ title, url, publishedAt }) => ({
+    title,
+    url,
+    ...(publishedAt !== undefined ? { publishedAt } : {}),
+  }));
+  if (serializeChatSourceRefs(withoutSnippets) !== null) return withoutSnippets;
+
+  // Extremely large titles/URLs or publication dates can still exhaust the
+  // envelope, so retain the longest valid ordered prefix as a last resort.
+  const citationOnly = withoutSnippets.map(({ title, url }) => ({ title, url }));
+  for (let length = citationOnly.length; length > 0; length--) {
+    const bounded = citationOnly.slice(0, length);
+    if (serializeChatSourceRefs(bounded) !== null) return bounded;
+  }
+
+  return normalizeChatSourceRefs([]);
+}
+
+/** Rehydrate the shared display contract without adding data to the saved marker. */
+function toDisplaySourceReferences(refs: readonly ChatSourceRef[]): readonly SourceReference[] {
+  return Object.freeze(
+    refs.map((ref) =>
+      Object.freeze({
+        title: ref.title,
+        path: ref.url,
+        score: 0,
+        kind: "web" as const,
+        url: ref.url,
+        ...(ref.snippet !== undefined ? { snippet: ref.snippet } : {}),
+        ...(ref.publishedAt !== undefined ? { publishedAt: ref.publishedAt } : {}),
+      })
+    )
+  );
 }

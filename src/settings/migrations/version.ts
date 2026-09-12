@@ -27,5 +27,7 @@
  *          credential cleanup is gated separately, in
  *          `legacyIndexRemovalMigration`, because this version is synced.
  *   14  → fold Codex's per-effort configured models into one row per base model.
+ *   15  → drop the providers, models, enrollments and the stored license key
+ *          of the removed Copilot Plus relay chat provider.
  */
-export const CURRENT_SETTINGS_VERSION = 14;
+export const CURRENT_SETTINGS_VERSION = 15;

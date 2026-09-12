@@ -37,7 +37,7 @@ async function searchRelatedNotesWithMiyo(
   // Related search can trigger a follow-up folder request after settings have
   // changed. Both requests must keep the credential paired with this endpoint.
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/280
-  const miyoClient = new MiyoClient({ plusLicenseKey: settings.plusLicenseKey });
+  const miyoClient = new MiyoClient();
   const folderName = getMiyoFolderName(app);
   const miyoFilePath = getMiyoFilePath(app, filePath);
   let baseUrl: string;

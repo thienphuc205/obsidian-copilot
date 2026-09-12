@@ -42,7 +42,6 @@ const noLegacyBackup = async () => ({ status: "not-needed" }) as const;
 
 const VAULT_ID = "a1b2c3d4";
 const BYOK_POINTER = `copilot-v${VAULT_ID}-provider-byok_openai`;
-const PLUS_POINTER = `copilot-v${VAULT_ID}-provider-plus_1`;
 
 let secrets: Map<string, string>;
 let app: App;
@@ -106,27 +105,16 @@ describe("model", () => {
       // Provider secrets are written by `ProviderRegistry.setApiKey`, outside
       // the persist path — seed this device's entries directly.
       secrets.set(BYOK_POINTER, "sk-provider-key");
-      secrets.set(PLUS_POINTER, "lic-12345");
 
       settingsStore.set(settingsAtom, {
         ...DEFAULT_SETTINGS,
         _keychainVaultId: VAULT_ID,
         openAIApiKey: "sk-top-level",
         openAIOrgId: "org-123",
-        isPaidUser: true,
-        plusLicenseKey: "lic-12345",
-        entitlementToken: "test-stale-entitlement-token",
         autoAcceptEdits: true,
         activeModels: [builtinRow, customRow],
         providers: {
           byok_openai: makeProvider({ apiKeyKeychainId: BYOK_POINTER }),
-          plus_1: makeProvider({
-            providerId: "plus_1",
-            displayName: "Copilot",
-            origin: { kind: "copilot-plus" },
-            requiresApiKey: false,
-            apiKeyKeychainId: PLUS_POINTER,
-          }),
         },
         configuredModels: [
           {
@@ -191,15 +179,6 @@ describe("model", () => {
       expect(reloaded.providers.byok_openai?.apiKeyKeychainId).toBe(BYOK_POINTER);
       expect(secrets.get(BYOK_POINTER)).toBe("sk-provider-key");
       expect(reloaded.configuredModels.map((m) => m.configuredModelId)).toEqual(["cm-1"]);
-
-      // Signed-in Plus: paid state and the provider row survive so the
-      // settings subscriber never reads reset as sign-out; the entitlement
-      // token still resets (its identity binding is invalidated).
-      expect(reloaded.isPaidUser).toBe(true);
-      expect(reloaded.plusLicenseKey).toBe("lic-12345");
-      expect(reloaded.providers.plus_1?.apiKeyKeychainId).toBe(PLUS_POINTER);
-      expect(secrets.get(PLUS_POINTER)).toBe("lic-12345");
-      expect(reloaded.entitlementToken).toBe(DEFAULT_SETTINGS.entitlementToken);
     });
   });
 });

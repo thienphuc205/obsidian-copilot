@@ -1,6 +1,11 @@
 import { logError, logInfo, logWarn } from "@/logger";
 import { requireNodeModule } from "@/utils/desktopRuntime";
-import { NdjsonLineSplitter } from "./debugTap";
+import {
+  NdjsonLineSplitter,
+  redactSensitiveError,
+  redactSensitivePayload,
+  redactSensitiveText,
+} from "./debugTap";
 
 type ChildProcessByStdio = import("node:child_process").ChildProcessByStdio<
   Writable,
@@ -21,6 +26,8 @@ export interface AcpProcessManagerOptions {
   env: NodeJS.ProcessEnv;
   /** Tag used in stderr/log lines so multiple agents can be distinguished. */
   logTag?: string;
+  /** Active descriptor credentials used to sanitize arbitrary child output. */
+  redactionSecrets?: readonly string[];
 }
 
 /**
@@ -38,6 +45,7 @@ export class AcpProcessManager {
   private hasExited = false;
   private exitCode: number | null = null;
   private exitSignal: NodeJS.Signals | null = null;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(private readonly opts: AcpProcessManagerOptions) {}
 
@@ -52,7 +60,12 @@ export class AcpProcessManager {
     const tag = this.opts.logTag ?? "acp";
     const { spawn } = requireNodeModule<typeof import("node:child_process")>("child_process");
     const { Readable, Writable } = requireNodeModule<typeof import("node:stream")>("stream");
-    logInfo(`[AgentMode] spawning ${this.opts.command} ${this.opts.args.join(" ")} (tag=${tag})`);
+    const redactionSecrets = this.opts.redactionSecrets ?? [];
+    logInfo(
+      `[AgentMode] spawning ${redactSensitiveText(this.opts.command, redactionSecrets)} ${this.opts.args
+        .map((arg) => redactSensitiveText(arg, redactionSecrets))
+        .join(" ")} (tag=${tag})`
+    );
     const child = spawn(this.opts.command, this.opts.args, {
       env: this.opts.env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -61,14 +74,19 @@ export class AcpProcessManager {
     this.child = child;
 
     child.on("error", (err) => {
-      logError(`[AgentMode] subprocess error (${tag})`, err);
+      logError(
+        `[AgentMode] subprocess error (${tag})`,
+        redactSensitiveError(err, redactionSecrets)
+      );
     });
     child.on("exit", (code, signal) => {
       this.hasExited = true;
       this.exitCode = code;
       this.exitSignal = signal;
       logInfo(`[AgentMode] subprocess exit (${tag}) code=${code} signal=${signal}`);
-      for (const fn of this.exitListeners) {
+      const listeners = Array.from(this.exitListeners);
+      this.exitListeners.clear();
+      for (const fn of listeners) {
         try {
           fn(code, signal);
         } catch (e) {
@@ -77,7 +95,7 @@ export class AcpProcessManager {
       }
     });
 
-    pipeStderrToLogger(child.stderr, tag);
+    pipeStderrToLogger(child.stderr, tag, redactionSecrets);
 
     // Bridge Node streams → Web Streams for `@agentclientprotocol/sdk`'s
     // `ndJsonStream`. `toWeb` is Node ≥17 (Electron 27 ships Node 18), but
@@ -125,17 +143,42 @@ export class AcpProcessManager {
    */
   async shutdown(): Promise<void> {
     if (!this.child || this.hasExited) return;
+    if (this.shutdownPromise) return this.shutdownPromise;
+
+    const operation = this.shutdownInternal(this.opts.redactionSecrets ?? []);
+    const tracked = operation.then(
+      (value) => {
+        if (this.shutdownPromise === tracked) this.shutdownPromise = null;
+        return value;
+      },
+      (error) => {
+        if (this.shutdownPromise === tracked) this.shutdownPromise = null;
+        throw error;
+      }
+    );
+    this.shutdownPromise = tracked;
+    return tracked;
+  }
+
+  private async shutdownInternal(redactionSecrets: readonly string[]): Promise<void> {
+    if (!this.child || this.hasExited) return;
     const child = this.child;
     const tag = this.opts.logTag ?? "acp";
 
+    const unsubscribe: { current: (() => void) | null } = { current: null };
     const exited = new Promise<void>((resolve) => {
-      this.onExit(() => resolve());
+      unsubscribe.current = this.onExit(() => {
+        const remove = unsubscribe.current;
+        unsubscribe.current = null;
+        remove?.();
+        resolve();
+      });
     });
 
     try {
       child.kill("SIGTERM");
     } catch (e) {
-      logWarn(`[AgentMode] SIGTERM failed (${tag})`, e);
+      logWarn(`[AgentMode] SIGTERM failed (${tag})`, redactSensitiveError(e, redactionSecrets));
     }
 
     const timeout = new Promise<"timeout">((resolve) =>
@@ -147,10 +190,13 @@ export class AcpProcessManager {
       try {
         child.kill("SIGKILL");
       } catch (e) {
-        logWarn(`[AgentMode] SIGKILL failed (${tag})`, e);
+        logWarn(`[AgentMode] SIGKILL failed (${tag})`, redactSensitiveError(e, redactionSecrets));
       }
       await exited;
     }
+    const remove = unsubscribe.current;
+    unsubscribe.current = null;
+    remove?.();
   }
 }
 
@@ -213,7 +259,11 @@ export function sanitizeAcpStdout(inner: ReadableStream<Uint8Array>): ReadableSt
   });
 }
 
-function pipeStderrToLogger(stderr: Readable, tag: string): void {
+function pipeStderrToLogger(
+  stderr: Readable,
+  tag: string,
+  additionalSecrets: readonly string[]
+): void {
   let buffer = "";
   stderr.setEncoding("utf-8");
   stderr.on("data", (chunk: string) => {
@@ -222,12 +272,17 @@ function pipeStderrToLogger(stderr: Readable, tag: string): void {
     while ((nlIdx = buffer.indexOf("\n")) !== -1) {
       const line = buffer.slice(0, nlIdx).trimEnd();
       buffer = buffer.slice(nlIdx + 1);
-      if (line) emitStderrLine(line, tag);
+      if (line) emitStderrLine(redactStderrLine(line, additionalSecrets), tag);
     }
   });
   stderr.on("end", () => {
-    if (buffer.trim()) emitStderrLine(buffer.trim(), tag);
+    if (buffer.trim()) emitStderrLine(redactStderrLine(buffer.trim(), additionalSecrets), tag);
   });
+}
+
+function redactStderrLine(line: string, additionalSecrets: readonly string[]): string {
+  const redacted = redactSensitivePayload(line, additionalSecrets);
+  return typeof redacted === "string" ? redacted : line;
 }
 
 function emitStderrLine(line: string, tag: string): void {

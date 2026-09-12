@@ -32,19 +32,17 @@ const DEFAULT_CONFIG: Required<NoteSearchConfig> = {
  * Searches only by note name (basename), never by path, to avoid confusion.
  *
  * @param query - Search query string
- * @param isCopilotPlus - Whether Copilot Plus features are enabled (includes PDFs)
  * @param config - Optional configuration for search behavior
  * @param currentActiveFile - Current active file to show as "Active Note" option
  * @returns Array of NoteSearchOption objects matching the query by name
  */
 export function useNoteSearch(
   query: string,
-  isCopilotPlus: boolean = false,
   config: NoteSearchConfig = {},
   currentActiveFile: TFile | null = null
 ): NoteSearchOption[] {
-  // Get all available notes (including PDFs in Plus mode)
-  const allNotes = useAllNotes(isCopilotPlus);
+  // Get all available notes (including PDFs)
+  const allNotes = useAllNotes();
 
   // Transform files into NoteSearchOption objects
   const allNoteOptions = useMemo(() => {

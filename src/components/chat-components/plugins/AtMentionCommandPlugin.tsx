@@ -19,7 +19,6 @@ import {
 import { useAtMentionSearch } from "@/components/chat-components/hooks/useAtMentionSearch";
 
 interface AtMentionCommandPluginProps {
-  isCopilotPlus?: boolean;
   /** Whether to surface Copilot built-in `@` tools (category + search hits). */
   showTools?: boolean;
   currentActiveFile?: TFile | null;
@@ -31,7 +30,6 @@ interface AtMentionCommandPluginProps {
 }
 
 export function AtMentionCommandPlugin({
-  isCopilotPlus = false,
   showTools = false,
   currentActiveFile = null,
   agentBrands = EMPTY_AGENT_MENTION_BRANDS,
@@ -96,7 +94,6 @@ export function AtMentionCommandPlugin({
     currentQuery,
     extendedState.mode,
     extendedState.selectedCategory,
-    isCopilotPlus,
     showTools,
     availableCategoryOptions,
     currentActiveFile,

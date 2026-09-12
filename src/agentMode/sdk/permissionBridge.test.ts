@@ -4,7 +4,11 @@ import type {
   PermissionDecision,
   PermissionPrompt,
 } from "@/agentMode/session/types";
-import { PermissionBridge, type AskUserQuestionPrompter } from "./permissionBridge";
+import {
+  PermissionBridge,
+  type AskUserQuestionPrompter,
+  type ScopeSandbox,
+} from "./permissionBridge";
 
 describe("PermissionBridge.canUseTool", () => {
   function makeBridge(
@@ -374,6 +378,199 @@ describe("PermissionBridge.canUseTool", () => {
       // Not read-only → the plan-file auto-allow proceeds as before.
       expect(result.behavior).toBe("allow");
       expect(prompter).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("selected-context scope sandbox", () => {
+    const VAULT = "/vault";
+
+    function makeScopeBridge(
+      sandbox: ScopeSandbox | null,
+      prompter: ((req: PermissionPrompt) => Promise<PermissionDecision>) | null = null,
+      extra?: { isPlanModePlanFilePath?: (p: string) => boolean }
+    ) {
+      return new PermissionBridge("session-1", {
+        getPrompter: () => prompter,
+        isPlanModePlanFilePath: extra?.isPlanModePlanFilePath,
+        getScopeSandbox: () => sandbox,
+      });
+    }
+
+    function folderScope(sandbox: Partial<ScopeSandbox>): ScopeSandbox {
+      return { vaultRoot: VAULT, ...sandbox };
+    }
+
+    it("allows a Write to a vault file under a selected folder (in-scope)", async () => {
+      const prompter = jest.fn(async () => ({
+        outcome: { outcome: "selected" as const, optionId: "allow_once" as const },
+      }));
+      const bridge = makeScopeBridge(
+        folderScope({ vaultRelativeFolders: new Set(["notes/projects"]) }),
+        prompter
+      );
+      const result = await bridge.canUseTool(
+        "Write",
+        { file_path: `${VAULT}/notes/projects/deep/spec.md`, content: "x" },
+        ctx
+      );
+      // In-scope writes still flow to the prompter like any other tool.
+      expect(prompter).toHaveBeenCalled();
+      expect(result.behavior).toBe("allow");
+    });
+
+    it("denies a Write outside the scope with the sandbox message", async () => {
+      const prompter = jest.fn();
+      const bridge = makeScopeBridge(
+        folderScope({ vaultRelativeFolders: new Set(["notes"]) }),
+        prompter
+      );
+      const result = await bridge.canUseTool(
+        "Write",
+        { file_path: `${VAULT}/secrets/other.md`, content: "x" },
+        ctx
+      );
+      expect(result.behavior).toBe("deny");
+      if (result.behavior === "deny") {
+        expect(result.message).toBe(
+          "Outside the selected context scope for this session — enable more context or turn off the Agent scope sandbox."
+        );
+      }
+      expect(prompter).not.toHaveBeenCalled();
+    });
+
+    it("denies an Edit outside the scope but allows an in-scope Edit", async () => {
+      const prompter = jest.fn(async () => ({
+        outcome: { outcome: "selected" as const, optionId: "allow_once" as const },
+      }));
+      const bridge = makeScopeBridge(
+        folderScope({
+          vaultRelativeFiles: new Set(["journal/today.md"]),
+        }),
+        prompter
+      );
+      const denied = await bridge.canUseTool(
+        "Edit",
+        { file_path: `${VAULT}/journal/yesterday.md`, old_string: "a", new_string: "b" },
+        ctx
+      );
+      expect(denied.behavior).toBe("deny");
+      expect(prompter).not.toHaveBeenCalled();
+      prompter.mockClear();
+      const allowed = await bridge.canUseTool(
+        "Edit",
+        { file_path: `${VAULT}/journal/today.md`, old_string: "a", new_string: "b" },
+        ctx
+      );
+      // In-scope edits still consult the prompter (the sandbox only denies).
+      expect(prompter).toHaveBeenCalled();
+      expect(allowed.behavior).toBe("allow");
+    });
+
+    it("normalizes an absolute path against the vault root before matching", async () => {
+      const bridge = makeScopeBridge(folderScope({ vaultRelativeFolders: new Set(["notes"]) }));
+      // Windows-style separators and a trailing separator on the tool path
+      // must not dodge the sandbox.
+      const result = await bridge.canUseTool(
+        "Write",
+        { file_path: "/vault/./notes/../secrets/x.md", content: "x" },
+        ctx
+      );
+      expect(result.behavior).toBe("deny");
+    });
+
+    it("treats a path outside the vault as out of scope (fail closed)", async () => {
+      const bridge = makeScopeBridge(folderScope({ vaultRelativeFolders: new Set(["notes"]) }));
+      const result = await bridge.canUseTool(
+        "Write",
+        { file_path: "/etc/hosts", content: "x" },
+        ctx
+      );
+      expect(result.behavior).toBe("deny");
+    });
+
+    it("contains absolute tool paths that fall under absoluteFolders", async () => {
+      const prompter = jest.fn(async () => ({
+        outcome: { outcome: "selected" as const, optionId: "allow_once" as const },
+      }));
+      const bridge = makeScopeBridge(
+        folderScope({ absoluteFolders: new Set(["/Users/x/other-vault"]) }),
+        prompter
+      );
+      const allowed = await bridge.canUseTool(
+        "Write",
+        { file_path: "/Users/x/other-vault/note.md", content: "x" },
+        ctx
+      );
+      expect(prompter).toHaveBeenCalled();
+      expect(allowed.behavior).toBe("allow");
+      prompter.mockClear();
+      const denied = await bridge.canUseTool(
+        "Write",
+        { file_path: "/Users/x/elsewhere/note.md", content: "x" },
+        ctx
+      );
+      expect(denied.behavior).toBe("deny");
+      expect(prompter).not.toHaveBeenCalled();
+    });
+
+    it("behaves byte-identically to a bridge without a scope when none is set", async () => {
+      const prompter = jest.fn(async () => ({
+        outcome: { outcome: "selected" as const, optionId: "allow_once" as const },
+      }));
+      for (const sandbox of [null, undefined]) {
+        const bridge = makeScopeBridge(sandbox ?? null, prompter);
+        // An out-of-vault write that would be denied under a scope instead
+        // routes through the prompter exactly as before.
+        const result = await bridge.canUseTool(
+          "Write",
+          { file_path: "/etc/hosts", content: "x" },
+          ctx
+        );
+        expect(prompter).toHaveBeenCalled();
+        expect(result.behavior).toBe("allow");
+        prompter.mockClear();
+      }
+    });
+
+    it("does not gate Bash — it keeps routing through the prompter", async () => {
+      const prompter = jest.fn(async () => ({
+        outcome: { outcome: "selected" as const, optionId: "allow_once" as const },
+      }));
+      const bridge = makeScopeBridge(
+        folderScope({ vaultRelativeFolders: new Set(["notes"]) }),
+        prompter
+      );
+      const result = await bridge.canUseTool("Bash", { command: "cat /etc/hosts" }, ctx);
+      expect(prompter).toHaveBeenCalled();
+      expect(result.behavior).toBe("allow");
+    });
+
+    it("lets the plan-file predicate win for its own paths even under a scope", async () => {
+      const prompter = jest.fn();
+      const bridge = makeScopeBridge(
+        folderScope({ vaultRelativeFolders: new Set(["notes"]) }),
+        prompter,
+        { isPlanModePlanFilePath: (p) => p.endsWith("/.claude/plans/foo.md") }
+      );
+      // ~/.claude/plans lives outside any vault scope, yet the plan-file
+      // auto-allow precedes the sandbox deny.
+      const result = await bridge.canUseTool(
+        "Write",
+        { file_path: "/Users/x/.claude/plans/foo.md", content: "# plan" },
+        ctx
+      );
+      expect(result.behavior).toBe("allow");
+      expect(prompter).not.toHaveBeenCalled();
+    });
+
+    it("denies NotebookEdit outside the scope like other write tools", async () => {
+      const bridge = makeScopeBridge(folderScope({ vaultRelativeFolders: new Set(["notes"]) }));
+      const result = await bridge.canUseTool(
+        "NotebookEdit",
+        { notebook_path: `${VAULT}/scratch/nb.ipynb` },
+        ctx
+      );
+      expect(result.behavior).toBe("deny");
     });
   });
 

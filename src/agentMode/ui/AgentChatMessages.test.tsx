@@ -6,7 +6,7 @@ import type {
   PermissionPrompt,
 } from "@/agentMode/session/types";
 import AgentChatMessages from "@/agentMode/ui/AgentChatMessages";
-import { AI_SENDER } from "@/constants";
+import { AI_SENDER, USER_SENDER } from "@/constants";
 import { act, render, screen } from "@testing-library/react";
 import React from "react";
 
@@ -38,8 +38,25 @@ jest.mock("@/components/chat-components/ChatSingleMessage", () => ({
 }));
 
 jest.mock("@/agentMode/ui/AgentTrailView", () => ({
-  AgentTrail: ({ timestamp }: { timestamp?: string }) => (
-    <div data-testid="agent-trail-timestamp">{timestamp}</div>
+  AgentTrail: ({
+    timestamp,
+    researchProgress,
+  }: {
+    timestamp?: string;
+    researchProgress?: unknown;
+  }) => (
+    <div>
+      <div data-testid="agent-trail-timestamp">{timestamp}</div>
+      <div data-testid="agent-trail-research">
+        {researchProgress ? "research-panel" : "plain-trail"}
+      </div>
+    </div>
+  ),
+}));
+
+jest.mock("@/agentMode/ui/AgentSourceList", () => ({
+  AgentSourceList: ({ sources }: { sources: Array<{ title: string }> }) => (
+    <div data-testid="restored-source-list">{sources.map((source) => source.title).join(", ")}</div>
   ),
 }));
 
@@ -71,6 +88,16 @@ function assistantMessage(
     timestamp: { epoch: timestampMs, display: "", fileName: "" },
     isVisible: true,
     ...overrides,
+  };
+}
+
+function userMessage(id: string, text: string): AgentChatMessage {
+  return {
+    id,
+    sender: USER_SENDER,
+    message: text,
+    timestamp: { epoch: 0, display: "", fileName: "" },
+    isVisible: true,
   };
 }
 
@@ -179,6 +206,46 @@ describe("AgentChatMessages", () => {
       expect(screen.getByTestId("agent-trail-timestamp").textContent).toBe(timestamp);
     });
 
+    it("shows restored sources on a plain assistant message without duplicating live tool sources", () => {
+      const sourceReferences = [
+        {
+          title: "Provider docs",
+          path: "https://example.test/docs",
+          url: "https://example.test/docs",
+          kind: "web" as const,
+          score: 0,
+        },
+      ];
+      const { rerender, props } = renderMessages(
+        [assistantMessage("loaded", 62_000, { sourceReferences })],
+        false
+      );
+
+      expect(screen.getByTestId("restored-source-list").textContent).toBe("Provider docs");
+
+      rerender(
+        <AgentChatMessages
+          {...props}
+          messages={[
+            assistantMessage("live", 63_000, {
+              sourceReferences,
+              parts: [
+                {
+                  kind: "tool_call",
+                  id: "web-1",
+                  title: "web_search",
+                  status: "completed",
+                  sourceReferences,
+                },
+              ],
+            }),
+          ]}
+        />
+      );
+
+      expect(screen.queryByTestId("restored-source-list")).toBeNull();
+    });
+
     it("shows questions before permissions and reveals a permission after questions clear for https://github.com/logancyang/obsidian-copilot/issues/2948", () => {
       const { rerender, props } = renderMessages([assistantMessage("answer-1", 62_000)], false, {
         pendingToolPermissions: [permission("permission-first"), permission("permission-second")],
@@ -225,6 +292,82 @@ describe("AgentChatMessages", () => {
 
       expect(screen.getByTestId("chat-messages").textContent).toContain("Plan plan-1");
       expect(screen.queryByTestId("agent-action-rail")).toBeNull();
+    });
+
+    it("swaps the trail for the research panel on a research run with tool calls", () => {
+      renderMessages(
+        [
+          userMessage(
+            "prompt-1",
+            "Use the research skill for: Tides. Show the plan first, search the vault before " +
+              "the web, and write the result into the research note you create."
+          ),
+          assistantMessage("answer-1", 62_000, {
+            parts: [
+              {
+                kind: "tool_call",
+                id: "grep-1",
+                title: "Grep",
+                status: "completed",
+                input: { pattern: "tides" },
+              },
+              {
+                kind: "tool_call",
+                id: "web-1",
+                title: "webSearch",
+                status: "completed",
+                input: { query: "tides" },
+              },
+              {
+                kind: "tool_call",
+                id: "write-1",
+                title: "Write",
+                status: "completed",
+                input: { file_path: "Research/Tides.md" },
+              },
+            ],
+          }),
+        ],
+        false
+      );
+
+      expect(screen.getByTestId("agent-trail-research").textContent).toBe("research-panel");
+    });
+
+    it("keeps the plain trail before a research run makes its first tool call", () => {
+      renderMessages(
+        [
+          userMessage("prompt-1", "Use the research skill for: Tides. Show the plan first."),
+          assistantMessage("answer-1", 62_000, {
+            parts: [{ kind: "thought", text: "Planning the search." }],
+          }),
+        ],
+        false
+      );
+
+      expect(screen.getByTestId("agent-trail-research").textContent).toBe("plain-trail");
+    });
+
+    it("keeps the plain trail for tool activity on a non-research turn", () => {
+      renderMessages(
+        [
+          userMessage("prompt-1", "Summarize my research notes about tides"),
+          assistantMessage("answer-1", 62_000, {
+            parts: [
+              {
+                kind: "tool_call",
+                id: "grep-1",
+                title: "Grep",
+                status: "completed",
+                input: { pattern: "tides" },
+              },
+            ],
+          }),
+        ],
+        false
+      );
+
+      expect(screen.getByTestId("agent-trail-research").textContent).toBe("plain-trail");
     });
   });
 });

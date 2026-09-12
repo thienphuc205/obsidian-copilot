@@ -25,6 +25,7 @@ import { executeAzureRemoval } from "./azureRemovalMigration";
 import { executeBedrockRemoval } from "./bedrockRemovalMigration";
 import { executeByokMigration } from "./byokMigration";
 import { planCodexModelIdCollapse } from "./codexModelIdMigration";
+import { executeCopilotPlusRemoval } from "./copilotPlusRemovalMigration";
 import { executeGitHubCopilotRemoval } from "./githubCopilotRemovalMigration";
 import { planOptionalCustomProviderAuthMigration } from "./optionalCustomProviderAuthMigration";
 import { planRequiresApiKeyBackfill } from "./requiresApiKeyMigration";
@@ -131,6 +132,13 @@ export async function runSettingsMigrations(api: ModelManagementApi): Promise<vo
   // back when the stored key resolves to nothing.
   if (fromVersion < 12) {
     await executeAzureRemoval(api, getSettings());
+  }
+
+  // v15: drop everything the removed Copilot Plus relay chat provider owned —
+  // its provider rows, configured models, enrollments, any selection naming
+  // it, and the stored license key in the keychain.
+  if (fromVersion < 15) {
+    await executeCopilotPlusRemoval(api, getSettings());
   }
 
   // v14: fold Codex's per-effort configured models (`gpt-5.6-sol[low]` …

@@ -1,6 +1,9 @@
 import { getSettings } from "@/settings/model";
+import { startAgentWebBridge } from "@/web/acpWebBridge";
+import { createWebProvider } from "@/web/provider";
+import type { WebProvider, WebProviderId } from "@/web/types";
 import { detectBinary } from "@/utils/detectBinary";
-import { AcpBackend, AcpSpawnDescriptor } from "@/agentMode/acp/types";
+import type { AcpBackend, AcpMcpHttpServer, AcpSpawnDescriptor } from "@/agentMode/acp/types";
 import { buildSimpleSpawnDescriptor } from "@/agentMode/backends/shared/simpleBinaryBackend";
 import { buildAgentSystemPrompt } from "@/agentMode/backends/shared/agentSystemPrompt";
 import {
@@ -8,10 +11,77 @@ import {
   sanitizeBuiltinSkillEnvOverrides,
 } from "@/agentMode/backends/shared/builtinSkillEnv";
 import type { PlanUsageReading } from "@/agentMode/session/planUsage";
+import { agentScopeWorkspaceRoot, getActiveAgentScope } from "@/agentMode/session/agentScope";
 import { defaultCodexHome, readCodexPlanUsage } from "./codexPlanUsage";
 import { mergeCodexConfigEnv } from "./codexConfigEnv";
 import { buildCodexAcpInvocation, resolveSupportedCodexAcpEntry } from "./codexVersion";
 
+interface AgentWebConfiguration {
+  provider: WebProviderId;
+  apiKey: string;
+  baseUrl?: string;
+}
+
+function getAgentWebConfiguration(): AgentWebConfiguration | undefined {
+  const settings = getSettings();
+  if (settings.enableAgentWebTools !== true) return undefined;
+  const provider = settings.agentWebSearchProvider;
+  let apiKey: string;
+  switch (provider) {
+    case "firecrawl":
+      apiKey = settings.firecrawlAgentWebApiKey;
+      break;
+    case "tavily":
+      apiKey = settings.tavilyAgentWebApiKey;
+      break;
+    case "exa":
+      apiKey = settings.exaAgentWebApiKey;
+      break;
+    case "custom":
+      apiKey = settings.customAgentWebApiKey;
+      break;
+    default:
+      return undefined;
+  }
+  if (typeof apiKey !== "string" || apiKey.length === 0) return undefined;
+  if (
+    provider === "custom" &&
+    (typeof settings.customAgentWebBaseUrl !== "string" ||
+      settings.customAgentWebBaseUrl.trim().length === 0)
+  ) {
+    return undefined;
+  }
+  return {
+    provider,
+    apiKey,
+    ...(provider === "custom" ? { baseUrl: settings.customAgentWebBaseUrl } : {}),
+  };
+}
+
+function getAgentWebProvider(generation: AgentWebConfiguration): WebProvider | undefined {
+  const current = getAgentWebConfiguration();
+  if (
+    !current ||
+    current.provider !== generation.provider ||
+    current.apiKey !== generation.apiKey ||
+    current.baseUrl !== generation.baseUrl
+  )
+    return undefined;
+  try {
+    return createWebProvider(current);
+  } catch {
+    return undefined;
+  }
+}
+
+function toAgentWebMcpServer(bridge: { url: string; token: string }): AcpMcpHttpServer {
+  return {
+    type: "http",
+    name: "copilot-web",
+    url: bridge.url,
+    headers: [{ name: "Authorization", value: `Bearer ${bridge.token}` }],
+  };
+}
 /**
  * Spawns the configured `@agentclientprotocol/codex-acp` package entry point.
  * The package exposes Codex as an ACP server over stdio. Authentication is inherited
@@ -57,7 +127,19 @@ export class CodexBackend implements AcpBackend {
     // time; the host restarts Codex on prompt changes via
     // `restartOnSystemPromptChange`.
     const directive = buildAgentSystemPrompt();
-    descriptor.env.CODEX_CONFIG = mergeCodexConfigEnv(descriptor.env.CODEX_CONFIG, directive);
+    // Vault-selection sandbox: when a first-turn selection is active, name the
+    // workspace root the scoped sessions run in. The sandbox itself is codex's
+    // pinned `sandbox_mode: "workspace-write"` against the SESSION cwd, which
+    // the manager sets to this same root at session-open (ACP carries cwd per
+    // session; this spawn descriptor has no cwd slot). A root equal to the
+    // vault root is no narrowing, so it earns no directive.
+    const vaultRoot = ctx.vaultBasePath.replace(/[/\\]+$/, "");
+    const scope = getActiveAgentScope();
+    const workspaceRoot = scope ? agentScopeWorkspaceRoot(scope, vaultRoot) : undefined;
+    descriptor.env.CODEX_CONFIG = mergeCodexConfigEnv(descriptor.env.CODEX_CONFIG, directive, {
+      workspaceRoot:
+        workspaceRoot !== undefined && workspaceRoot !== vaultRoot ? workspaceRoot : undefined,
+    });
     // Deliberately no `project_doc_fallback_filenames=["project.md"]`: project.md is metadata,
     // while Codex discovers the canonical AGENTS.md instructions from the session cwd.
     const entryPath = resolveSupportedCodexAcpEntry(descriptor.command);
@@ -75,7 +157,25 @@ export class CodexBackend implements AcpBackend {
       nodePath ?? undefined
     );
     this.codexHome = invocation.env.CODEX_HOME ?? defaultCodexHome();
-    return { ...descriptor, ...invocation };
+    const generation = getAgentWebConfiguration();
+    if (generation === undefined) return { ...descriptor, ...invocation };
+    const configuredProvider = getAgentWebProvider(generation);
+    if (!configuredProvider) return { ...descriptor, ...invocation };
+
+    const getProvider = (): WebProvider | undefined => getAgentWebProvider(generation);
+    const bridge = await startAgentWebBridge({ getProvider });
+    // Settings can change while the listener is starting. Do not return a
+    // descriptor for a generation that is already disabled or missing its key.
+    if (!getProvider()) {
+      await bridge.dispose();
+      return { ...descriptor, ...invocation };
+    }
+    return {
+      ...descriptor,
+      ...invocation,
+      mcpServers: [toAgentWebMcpServer(bridge)],
+      dispose: () => bridge.dispose(),
+    };
   }
 
   /**

@@ -100,7 +100,7 @@ export class ConfiguredModelRegistry {
   }
 
   /** Patches `info` only — id / providerId / configuredAt are
-   *  immutable. Used by `CopilotPlusSetupApi` to refresh model
+   *  immutable. Used by setup flows to refresh model
    *  metadata when Plus updates context limits / pricing. */
   async update(configuredModelId: string, patch: { info?: Partial<ModelInfo> }): Promise<void> {
     const existing = getSettings().configuredModels.find(

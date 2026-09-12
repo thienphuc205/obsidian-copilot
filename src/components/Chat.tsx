@@ -15,14 +15,7 @@ import ChatInput from "@/components/chat-components/ChatModeInput";
 import ChatMessages, { isChatEmpty } from "@/components/chat-components/ChatMessages";
 import { AgentModeBanner } from "@/components/chat-components/ui/AgentModeBanner";
 import { useChatModelPicker } from "@/components/chat-components/useChatModelPicker";
-import {
-  ABORT_REASON,
-  AI_SENDER,
-  EVENT_NAMES,
-  LOADING_MESSAGES,
-  RESTRICTION_MESSAGES,
-  USER_SENDER,
-} from "@/constants";
+import { ABORT_REASON, AI_SENDER, EVENT_NAMES, LOADING_MESSAGES, USER_SENDER } from "@/constants";
 import { AppContext, ChatViewEventTarget, EventTargetContext } from "@/context";
 import { ChatInputProvider, useChatInput } from "@/context/ChatInputContext";
 import { useChatManager } from "@/hooks/useChatManager";
@@ -36,7 +29,7 @@ import { getModelKeyFromModel, useSettingsValue } from "@/settings/model";
 import { ChatManagerChatUIState } from "@/state/ChatUIState";
 import { FileParserManager } from "@/tools/FileParserManager";
 import { ChatMessage } from "@/types/message";
-import { err2String, isPlusChain, modelSupportsVision } from "@/utils";
+import { err2String, modelSupportsVision } from "@/utils";
 import { arrayBufferToBase64 } from "@/utils/base64";
 import { appendUniqueFiles } from "@/utils/fileListUtils";
 import { Notice, TFile } from "obsidian";
@@ -196,14 +189,6 @@ const ChatInternal: React.FC<ChatProps & { chatInput: ReturnType<typeof useChatI
   } = {}) => {
     if (!inputMessage && selectedImages.length === 0) return;
 
-    // Check for URL restrictions in non-Plus chains and show notice, but continue processing
-    const hasUrlsInContext = urls && urls.length > 0;
-
-    if (hasUrlsInContext && !isPlusChain(currentChain)) {
-      // Show notice but continue processing the message without URL context
-      new Notice(RESTRICTION_MESSAGES.URL_PROCESSING_RESTRICTED);
-    }
-
     // Hard-block sending images to a model that is KNOWN to lack vision. We only
     // block when capabilities are populated (an empty array still means "known");
     // undefined capabilities mean "unknown" and must not block. Inputs are left
@@ -262,10 +247,10 @@ const ChatInternal: React.FC<ChatProps & { chatInput: ReturnType<typeof useChatI
         displayText += " " + toolCalls.join("\n");
       }
 
-      // Create message context - filter out URLs for non-Plus chains
+      // Create message context
       const context = {
         notes,
-        urls: isPlusChain(currentChain) ? urls || [] : [],
+        urls: urls || [],
         tags: contextTags || [],
         folders: contextFolders || [],
         selectedTextContexts,

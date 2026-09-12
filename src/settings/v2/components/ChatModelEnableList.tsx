@@ -16,10 +16,10 @@ const EMPTY_ENABLED: readonly string[] = Object.freeze([]);
 
 /**
  * Curation list for the non-agent "chat" backend (Quick Chat). Sources every
- * BYOK / Copilot Plus configured chat model from the registry and toggles
- * `backends.chat` through `BackendConfigRegistry`. Reuses the shared
- * `ModelEnableList` UI and grouping helpers; agent-origin models are excluded
- * because the chat backend instantiates via LangChain, not an agent CLI.
+ * BYOK configured chat model from the registry and toggles `backends.chat`
+ * through `BackendConfigRegistry`. Reuses the shared `ModelEnableList` UI and
+ * grouping helpers; agent-origin models are excluded because the chat backend
+ * instantiates via LangChain, not an agent CLI.
  */
 export const ChatModelEnableList: React.FC = () => {
   const api = useModelManagement();
@@ -40,11 +40,8 @@ export const ChatModelEnableList: React.FC = () => {
     [configuredModels, providers, enabledIds]
   );
 
-  // The locked Copilot group is an opencode-list feature, so the last argument
-  // never reaches it: this list is where a user curates chat models they can run,
-  // and the Quick Chat picker is where the lineup gets advertised.
   const groups = React.useMemo<ModelEnableGroup[]>(
-    () => buildModelEnableGroups(partition, false, query, false),
+    () => buildModelEnableGroups(partition, false, query),
     [partition, query]
   );
 

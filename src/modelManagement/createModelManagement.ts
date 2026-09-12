@@ -33,7 +33,6 @@ import {
 import { ProviderRegistry } from "@/modelManagement/providers/ProviderRegistry";
 import { AgentSetupApi } from "@/modelManagement/setup/AgentSetupApi";
 import { ByokSetupApi } from "@/modelManagement/setup/ByokSetupApi";
-import { CopilotPlusSetupApi } from "@/modelManagement/setup/CopilotPlusSetupApi";
 
 export interface CreateModelManagementInput {
   app: App;
@@ -49,7 +48,6 @@ export interface ModelManagementApi {
   setup: {
     byok: ByokSetupApi;
     agent: AgentSetupApi;
-    copilotPlus: CopilotPlusSetupApi;
   };
   coordinator: ModelManagementCoordinator;
   /**
@@ -136,9 +134,9 @@ export function createModelManagement(input: CreateModelManagementInput): ModelM
     configuredModelRegistry,
     adapters
   );
-  // Coordinator is constructed before the setup APIs because both
-  // `AgentSetupApi` and `CopilotPlusSetupApi` depend on it for their
-  // cross-slice cascades (diff-reconcile drops, sign-out removal).
+  // Coordinator is constructed before the setup APIs because
+  // `AgentSetupApi` depends on it for its cross-slice cascades
+  // (diff-reconcile drops).
   const coordinator = new ModelManagementCoordinator(
     providerRegistry,
     configuredModelRegistry,
@@ -151,12 +149,6 @@ export function createModelManagement(input: CreateModelManagementInput): ModelM
       configuredModelRegistry,
       backendConfigRegistry,
       catalogService,
-      coordinator
-    ),
-    copilotPlus: new CopilotPlusSetupApi(
-      providerRegistry,
-      configuredModelRegistry,
-      backendConfigRegistry,
       coordinator
     ),
   };

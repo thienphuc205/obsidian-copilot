@@ -212,7 +212,7 @@ export function ChatSettingsPopover() {
                       <div className="tw-flex-1 tw-space-y-2">
                         <div className="tw-space-y-1">
                           <div className="tw-text-xs tw-font-semibold tw-text-error">
-                            Copilot Plus Features Will Become Unavailable
+                            Builtin Features Will Become Unavailable
                           </div>
                           <div className="tw-flex tw-flex-col  tw-items-center tw-gap-2 tw-text-xs tw-leading-relaxed tw-text-muted">
                             <div>

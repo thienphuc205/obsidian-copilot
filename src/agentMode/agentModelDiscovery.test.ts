@@ -43,8 +43,6 @@ jest.mock("@/agentMode", () => ({
         return provider.origin.catalogProviderId
           ? { id: provider.origin.catalogProviderId, native: false }
           : null;
-      case "copilot-plus":
-        return { id: "copilot-plus", native: false };
       case "agent":
         return { id: provider.providerId, native: true };
       default:
@@ -95,7 +93,6 @@ interface ApiFake {
   api: ModelManagementApi;
   agentProviders: Array<{ providerId: string; origin: { kind: string; agentType: string } }>;
   byok: Array<{ origin: { kind: string; catalogProviderId?: string } }>;
-  plus: Array<{ origin: { kind: string } }>;
   registerAgentProvider: jest.Mock;
   syncAgentModels: jest.Mock;
   setEnabledModels: jest.Mock;
@@ -104,7 +101,6 @@ interface ApiFake {
 function makeApiFake(): ApiFake {
   const agentProviders: ApiFake["agentProviders"] = [];
   const byok: ApiFake["byok"] = [];
-  const plus: ApiFake["plus"] = [];
 
   // registerAgentProvider returns configuredModelIds in wireModelIds order and
   // records an agent provider so the next probe takes the sync branch.
@@ -126,7 +122,6 @@ function makeApiFake(): ApiFake {
       listByOrigin: (kind: string) => {
         if (kind === "agent") return agentProviders;
         if (kind === "byok") return byok;
-        if (kind === "copilot-plus") return plus;
         return [];
       },
     },
@@ -138,7 +133,6 @@ function makeApiFake(): ApiFake {
     api,
     agentProviders,
     byok,
-    plus,
     registerAgentProvider,
     syncAgentModels,
     setEnabledModels,
@@ -477,11 +471,6 @@ describe("buildManagedOpencodeProviderIds", () => {
       makeProvider("p2", { kind: "byok", catalogProviderId: "openai" }),
     ]);
     expect(managed).toEqual(new Set(["anthropic", "openai"]));
-  });
-
-  it("maps copilot-plus to the reserved opencode provider id", () => {
-    const managed = buildManagedOpencodeProviderIds([makeProvider("p1", { kind: "copilot-plus" })]);
-    expect(managed).toEqual(new Set(["copilot-plus"]));
   });
 
   it("excludes unroutable BYOK providers (no catalog id → null mapping)", () => {

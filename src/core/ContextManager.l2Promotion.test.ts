@@ -45,6 +45,15 @@ jest.mock("@/commands/customCommandUtils", () => ({
   processPrompt: jest.fn(),
 }));
 
+// ContextManager reads "@/utils" at require time (tag/folder helpers) and
+// MessageRepository uses formatDateTime; the real module is out of this suite's
+// scope, so stub the three functions the reachable paths need.
+jest.mock("@/utils", () => ({
+  getNotesFromPath: jest.fn(() => []),
+  getNotesFromTags: jest.fn(() => []),
+  formatDateTime: jest.fn(() => ({ fileName: "stub", formatted: "stub" })),
+}));
+
 jest.mock("./ContextCompactor", () => ({}));
 
 import { ContextManager } from "./ContextManager";

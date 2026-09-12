@@ -58,7 +58,13 @@ jest.mock("@/services/settingsSecretTransforms", () => ({
   // Reason: stub the canonical secret-field list used by hydrateFromKeychain.
   // Keep it minimal so tests targeting a single field don't accidentally
   // trigger hydration for every default provider.
-  TOP_LEVEL_SECRET_FIELDS: ["openAIApiKey"] as const,
+  TOP_LEVEL_SECRET_FIELDS: [
+    "openAIApiKey",
+    "firecrawlAgentWebApiKey",
+    "tavilyAgentWebApiKey",
+    "exaAgentWebApiKey",
+    "customAgentWebApiKey",
+  ] as const,
   stripKeychainFields: jest.fn((settings: Record<string, unknown>) => {
     const out = { ...settings };
     // Reason: mirror the real isSensitiveKey heuristic for top-level fields
@@ -346,6 +352,31 @@ describe("keychainService", () => {
           "legacy-value"
         );
       });
+
+      it.each([
+        "firecrawlAgentWebApiKey",
+        "tavilyAgentWebApiKey",
+        "exaAgentWebApiKey",
+        "customAgentWebApiKey",
+      ] as const)("recovers %s after a save when data.json omits the field", async (keyField) => {
+        const storedSecrets = new Map<string, string>();
+        const secretStorage = makeSecretStorage();
+        secretStorage.setSecret.mockImplementation((id: string, value: string) => {
+          storedSecrets.set(id, value);
+        });
+        secretStorage.getSecret.mockImplementation((id: string) => storedSecrets.get(id) ?? null);
+        const service = KeychainService.getInstance(makeApp({ secretStorage }));
+
+        const saved = makeSettings({ [keyField]: "provider-secret" });
+        const { secretEntries } = service.persistSecrets(saved);
+        for (const [id, value] of secretEntries) service.setSecretById(id, value);
+
+        const diskSettings = makeSettings();
+        expect(diskSettings).not.toHaveProperty(keyField);
+        const reloaded = await service.hydrateFromKeychain(diskSettings);
+
+        expect(reloaded.settings[keyField]).toBe("provider-secret");
+      });
     });
 
     // ---------------------------------------------------------------------------
@@ -388,6 +419,49 @@ describe("keychainService", () => {
         expect(current.activeModels[0].apiKey).toBe("chat-secret");
         expect(prev.openAIApiKey).toBe("sk-prev");
         expect(prev.activeModels[0].apiKey).toBe("chat-prev");
+      });
+
+      it("keeps an unrelated key after clearing the Agent web key before sparse hydration", async () => {
+        const storedSecrets = new Map<string, string>();
+        const secretStorage = makeSecretStorage();
+        secretStorage.setSecret.mockImplementation((id: string, value: string) => {
+          storedSecrets.set(id, value);
+        });
+        secretStorage.getSecret.mockImplementation((id: string) => storedSecrets.get(id) ?? null);
+        const service = KeychainService.getInstance(makeApp({ secretStorage }));
+        const firecrawlId = "copilot-v" + service.getVaultId() + "-firecrawl-agent-web-api-key";
+        const openAiId = "copilot-v" + service.getVaultId() + "-open-a-i-api-key";
+
+        const initial = makeSettings({
+          firecrawlAgentWebApiKey: "fc-secret",
+          openAIApiKey: "sk-unrelated",
+        });
+        const initialPersist = service.persistSecrets(initial, makeSettings());
+        for (const [id, value] of initialPersist.secretEntries) {
+          service.setSecretById(id, value);
+        }
+
+        const cleared = makeSettings({
+          firecrawlAgentWebApiKey: "",
+          openAIApiKey: "sk-unrelated",
+        });
+        const clearPersist = service.persistSecrets(cleared, initial);
+        for (const [id, value] of clearPersist.secretEntries) {
+          service.setSecretById(id, value);
+        }
+        for (const id of clearPersist.keychainIdsToDelete) {
+          service.setSecretById(id, "");
+        }
+
+        const sparseSettings = makeSettings();
+        expect(sparseSettings).not.toHaveProperty("firecrawlAgentWebApiKey");
+        expect(sparseSettings).not.toHaveProperty("openAIApiKey");
+        const reloaded = await service.hydrateFromKeychain(sparseSettings);
+
+        expect(storedSecrets.get(firecrawlId)).toBe("");
+        expect(storedSecrets.get(openAiId)).toBe("sk-unrelated");
+        expect(reloaded.settings.firecrawlAgentWebApiKey).toBe("");
+        expect(reloaded.settings.openAIApiKey).toBe("sk-unrelated");
       });
     });
 

@@ -5,11 +5,13 @@
  * Miyo in use, and available). These tests assert how the two document parsers
  * compose that decision with their (deliberately asymmetric) error shapes:
  *   - Docs4LLMParser THROWS on a Miyo parse failure so the caller marks that
- *     file failed/retriable — and never falls back to cloud (privacy).
+ *     file failed/retriable — it is never routed elsewhere silently.
  *   - PDFParser (single-doc mode) RETURNS an error string on a Miyo parse
- *     failure — also never falling back to cloud.
+ *     failure — also never routed elsewhere silently.
  * An explicit "miyo" field always fails closed when Miyo can't be used — whether
- * it's unreachable or no longer in use (disconnected) — never a silent cloud upload.
+ * it's unreachable or no longer in use (disconnected). There is no relay fallback
+ * anywhere: a legacy non-"miyo" field value only reaches the legacy PDF cache and
+ * then a local-only error.
  */
 
 // resolveDocProcessorBackend gates on isMiyoAvailableForCapability, reads the
@@ -20,7 +22,7 @@ const mockRefresh = jest.fn(async () => ({}));
 // resolveDocProcessorBackend also gates on shouldUseMiyo (is Miyo actually in
 // use, not just the persisted field). Default true so tests exercise the
 // doc-processor routing; a dedicated test flips it to assert the stale-preference
-// path returns plus.
+// path fails closed.
 const mockShouldUseMiyo = jest.fn(() => true);
 jest.mock("@/miyo/miyoRuntimePolicy", () => ({
   shouldUseMiyo: () => mockShouldUseMiyo(),
@@ -64,7 +66,7 @@ jest.mock("@/settings/model", () => ({
   getSettings: () => mockGetSettings(),
 }));
 
-import type { BrevilabsClient } from "@/LLMProviders/brevilabsClient";
+import type { LocalPdfParser } from "@/context/documents/pdfTypes";
 import { isMiyoAvailableForCapability } from "@/miyo/miyoStatusStore";
 import type { CopilotSettings } from "@/settings/model";
 import type { TFile, Vault } from "obsidian";
@@ -102,7 +104,7 @@ beforeEach(() => {
 });
 
 describe("Docs4LLMParser — batch × partial failure (Miyo available)", () => {
-  it("returns content for parsable PDFs and throws for the failing one, never touching cloud", async () => {
+  it("returns content for parsable PDFs and throws for the failing one", async () => {
     mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
     mockAvailable.mockReturnValue(true);
     // First file parses; second file fails at the Miyo endpoint.
@@ -110,58 +112,169 @@ describe("Docs4LLMParser — batch × partial failure (Miyo available)", () => {
       .mockResolvedValueOnce({ text: "extracted one" })
       .mockRejectedValueOnce(new Error("connection reset"));
 
-    const docs4llm = jest.fn();
     const parser = new Docs4LLMParser();
 
     await expect(parser.parseFile(pdf("a"), asVault)).resolves.toBe("extracted one");
-    // Privacy: the failing file throws instead of falling back to cloud.
+    // The failing file throws instead of being silently routed elsewhere.
     await expect(parser.parseFile(pdf("b"), asVault)).rejects.toThrow(/Miyo failed to parse b/);
-
-    expect(docs4llm).not.toHaveBeenCalled();
   });
 });
 
 describe("Docs4LLMParser — fail closed (field miyo in use, Miyo unavailable)", () => {
-  it("throws and never uploads to cloud when explicitly-chosen Miyo is unreachable", async () => {
+  it("throws when explicitly-chosen Miyo is unreachable instead of degrading silently", async () => {
     mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
     mockAvailable.mockReturnValue(false); // Miyo not reachable
-    const docs4llm = jest.fn().mockResolvedValue({ response: "cloud markdown" });
 
     const parser = new Docs4LLMParser();
 
     await expect(parser.parseFile(pdf("a"), asVault)).rejects.toThrow(/Miyo.*is unavailable/);
     expect(mockParseDoc).not.toHaveBeenCalled();
-    expect(docs4llm).not.toHaveBeenCalled(); // privacy: no cloud fallback
   });
 });
 
 describe("PDFParser — error shape preserved (Miyo available, parse fails)", () => {
-  it("returns an error string rather than throwing or falling back to cloud", async () => {
+  it("returns an error string rather than throwing", async () => {
     mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
     mockAvailable.mockReturnValue(true);
     mockParseDoc.mockRejectedValue(new Error("endpoint down"));
-    const pdf4llm = jest.fn();
 
-    const parser = new PDFParser({ pdf4llm } as unknown as BrevilabsClient);
+    const parser = new PDFParser(undefined);
     const result = await parser.parseFile(pdf("solo"), asVault);
 
     expect(result).toContain("[Error: Could not extract content from PDF solo");
-    expect(pdf4llm).not.toHaveBeenCalled();
   });
 });
 
 describe("PDFParser — fail closed (field miyo in use, Miyo unavailable)", () => {
-  it("returns an error and never uploads to cloud when explicitly-chosen Miyo is unreachable", async () => {
+  it("returns an error when explicitly-chosen Miyo is unreachable instead of degrading silently", async () => {
     mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
     mockAvailable.mockReturnValue(false);
-    const pdf4llm = jest.fn().mockResolvedValue({ response: "cloud pdf" });
 
-    const parser = new PDFParser({ pdf4llm } as unknown as BrevilabsClient);
+    const parser = new PDFParser(undefined);
     const result = await parser.parseFile(pdf("solo"), asVault);
 
     expect(result).toContain("Miyo (local document processor) is unavailable");
     expect(mockParseDoc).not.toHaveBeenCalled();
-    expect(pdf4llm).not.toHaveBeenCalled(); // privacy: no cloud fallback
+  });
+});
+
+describe("PDFParser — injected local parser", () => {
+  const localResult = {
+    metadata: {
+      byteLength: 3,
+      outputCharacters: 10,
+      pageCount: 2,
+      pagesProcessed: 2,
+    },
+    pages: [
+      { pageNumber: 1, text: "Local page one" },
+      { pageNumber: 2, text: "Local page two" },
+    ],
+  };
+
+  it("uses local bytes before cache and Miyo, preserving page markers", async () => {
+    mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "plus" as unknown as "miyo" }));
+    const parse = jest.fn().mockResolvedValue(localResult);
+    const factory = jest.fn<Promise<LocalPdfParser | null>, []>().mockResolvedValue({ parse });
+    vault.readBinary.mockResolvedValue(new Uint8Array([1, 2, 3]).buffer);
+
+    const parser = new PDFParser(undefined, {
+      localPdfParserFactory: factory,
+    });
+    const result = await parser.parseFile(pdf("local"), asVault);
+
+    expect(result).toBe("[Page 1]\nLocal page one\n\n[Page 2]\nLocal page two");
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]));
+    expect(mockPdfCacheGet).not.toHaveBeenCalled();
+    expect(mockPdfCacheSet).not.toHaveBeenCalled();
+    expect(mockParseDoc).not.toHaveBeenCalled();
+  });
+
+  it("memoizes the local parser factory across PDF reads", async () => {
+    const parse = jest.fn().mockResolvedValue(localResult);
+    const factory = jest.fn<Promise<LocalPdfParser | null>, []>().mockResolvedValue({ parse });
+    const parser = new PDFParser(undefined, {
+      localPdfParserFactory: factory,
+    });
+
+    await parser.parseFile(pdf("first"), asVault);
+    await parser.parseFile(pdf("second"), asVault);
+
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledTimes(2);
+    expect(mockPdfCacheGet).not.toHaveBeenCalled();
+  });
+
+  it("keeps the legacy cache route when no local package is available and the field is a legacy value", async () => {
+    mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "plus" as unknown as "miyo" }));
+    const factory = jest.fn<Promise<LocalPdfParser | null>, []>().mockResolvedValue(null);
+    mockPdfCacheGet.mockResolvedValue({ response: "cached text" });
+
+    const parser = new PDFParser(undefined, {
+      localPdfParserFactory: factory,
+    });
+    await expect(parser.parseFile(pdf("legacy"), asVault)).resolves.toBe("cached text");
+
+    expect(factory).toHaveBeenCalledTimes(1);
+    expect(mockPdfCacheGet).toHaveBeenCalledTimes(1);
+    // A legacy backend choice is never probed — Miyo is only checked for an
+    // explicit "miyo" field.
+    expect(mockRefresh).not.toHaveBeenCalled();
+    expect(mockParseDoc).not.toHaveBeenCalled();
+  });
+
+  it("fails closed with a local-only error when the legacy cache has no entry", async () => {
+    mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "plus" as unknown as "miyo" }));
+    const factory = jest.fn<Promise<LocalPdfParser | null>, []>().mockResolvedValue(null);
+
+    const parser = new PDFParser(undefined, {
+      localPdfParserFactory: factory,
+    });
+    await expect(parser.parseFile(pdf("orphan"), asVault)).resolves.toContain(
+      "No local document processor is available"
+    );
+
+    expect(mockPdfCacheGet).toHaveBeenCalledTimes(1);
+    expect(mockRefresh).not.toHaveBeenCalled();
+    expect(mockParseDoc).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when local parsing errors or returns no text", async () => {
+    const parse = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("worker failed"))
+      .mockResolvedValueOnce({
+        ...localResult,
+        pages: [],
+      });
+    const factory = jest.fn<Promise<LocalPdfParser | null>, []>().mockResolvedValue({ parse });
+    const parser = new PDFParser(undefined, {
+      localPdfParserFactory: factory,
+    });
+
+    await expect(parser.parseFile(pdf("failed"), asVault)).resolves.toContain(
+      "local PDF parser failed"
+    );
+    await expect(parser.parseFile(pdf("empty"), asVault)).resolves.toContain(
+      "scanned (no text layer)"
+    );
+    expect(mockParseDoc).not.toHaveBeenCalled();
+    expect(mockPdfCacheGet).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back when the local package factory itself fails", async () => {
+    const factory = jest
+      .fn<Promise<LocalPdfParser | null>, []>()
+      .mockRejectedValue(new Error("local package failed"));
+    const parser = new PDFParser(undefined, {
+      localPdfParserFactory: factory,
+    });
+
+    await expect(parser.parseFile(pdf("factory-failed"), asVault)).resolves.toContain(
+      "Could not extract content from PDF factory-failed"
+    );
+    expect(mockPdfCacheGet).not.toHaveBeenCalled();
   });
 });
 
@@ -169,88 +282,77 @@ describe("parse-boundary status refresh (field miyo, status unconclusive)", () =
   it("refreshes once when status is 'unknown', then routes to Miyo if it became available", async () => {
     mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
     // Status starts unconclusive (never probed). The refresh confirms available,
-    // so the subsequent sync read routes to Miyo instead of silently going cloud.
+    // so the subsequent sync read routes to Miyo.
     mockSnapshot.mockReturnValue({ documentProcessor: "unknown" });
     mockAvailable.mockReturnValue(true);
     mockParseDoc.mockResolvedValue({ text: "extracted via miyo" });
-    const pdf4llm = jest.fn();
 
-    const parser = new PDFParser({ pdf4llm } as unknown as BrevilabsClient);
+    const parser = new PDFParser(undefined);
     const result = await parser.parseFile(pdf("solo"), asVault);
 
     expect(mockRefresh).toHaveBeenCalledTimes(1);
     expect(result).toBe("extracted via miyo");
-    expect(pdf4llm).not.toHaveBeenCalled();
   });
 
-  it("FAILS CLOSED (no cloud) when 'stale' probe confirms Miyo still unavailable", async () => {
-    // Privacy: an EXPLICIT docProcessorBackend="miyo" that can't be confirmed must
-    // NOT silently upload to the cloud. The user chose local — surface an error.
+  it("FAILS CLOSED when 'stale' probe confirms Miyo still unavailable", async () => {
+    // An EXPLICIT docProcessorBackend="miyo" that can't be confirmed must NOT
+    // degrade silently. The user chose local — surface an error.
     mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
     mockSnapshot.mockReturnValue({ documentProcessor: "stale" });
     mockAvailable.mockReturnValue(false); // refresh didn't bring Miyo back
-    const pdf4llm = jest.fn().mockResolvedValue({ response: "cloud pdf" });
 
-    const parser = new PDFParser({ pdf4llm } as unknown as BrevilabsClient);
+    const parser = new PDFParser(undefined);
     const result = await parser.parseFile(pdf("solo"), asVault);
 
     expect(mockRefresh).toHaveBeenCalledTimes(1);
     expect(result).toContain("Miyo (local document processor) is unavailable");
-    expect(pdf4llm).not.toHaveBeenCalled(); // never reached the cloud
     expect(mockParseDoc).not.toHaveBeenCalled();
   });
 
-  it("Docs4LLMParser THROWS (no cloud) when Miyo is explicitly chosen but unavailable", async () => {
+  it("Docs4LLMParser THROWS when Miyo is explicitly chosen but unavailable", async () => {
     mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
     mockSnapshot.mockReturnValue({ documentProcessor: "unknown" });
     mockAvailable.mockReturnValue(false);
-    const docs4llm = jest.fn();
 
     const parser = new Docs4LLMParser();
 
     await expect(parser.parseFile(pdf("solo"), asVault)).rejects.toThrow(/Miyo.*is unavailable/);
-    expect(docs4llm).not.toHaveBeenCalled(); // never uploaded to cloud
   });
 
-  it("fails closed (no cloud) when the field is 'miyo' but Miyo is no longer in use", async () => {
+  it("fails closed when the field is 'miyo' but Miyo is no longer in use", async () => {
     // A stale preference left after Disconnect: docProcessorBackend still "miyo"
     // but shouldUseMiyo is false. The user explicitly chose local, so this must
-    // NOT silently upload to the cloud — fail closed and let them switch to Plus.
+    // not degrade silently — fail closed with an explicit error.
     mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
     mockShouldUseMiyo.mockReturnValue(false);
     mockSnapshot.mockReturnValue({ documentProcessor: "unknown" });
-    const pdf4llm = jest.fn().mockResolvedValue({ response: "cloud pdf" });
 
-    const parser = new PDFParser({ pdf4llm } as unknown as BrevilabsClient);
+    const parser = new PDFParser(undefined);
     const result = await parser.parseFile(pdf("solo"), asVault);
 
-    // No probe (Miyo isn't in use), no cloud upload — an explicit error instead.
+    // No probe (Miyo isn't in use) — an explicit error instead.
     expect(mockRefresh).not.toHaveBeenCalled();
     expect(result).toContain("Miyo (local document processor) is unavailable");
-    expect(pdf4llm).not.toHaveBeenCalled();
     expect(mockParseDoc).not.toHaveBeenCalled();
   });
 
-  it("does NOT re-read health after resolving to Miyo, so a stale-horizon flip can't leak to cloud", async () => {
+  it("does NOT re-read health after resolving to Miyo, so a stale-horizon flip can't override the resolver", async () => {
     // Regression: parseDoc used to re-check the backend synchronously. Because
     // status degrades by wall-clock, the resolver could return "miyo" and an
-    // immediately-following sync check return "plus" → parseDoc null → cloud.
-    // Simulate that flip with a sequential availability mock; the parser must
-    // commit to Miyo (call parseDoc) and NEVER touch the cloud API.
+    // immediately-following sync check disagree — the parser must commit to
+    // Miyo (call parseDoc) regardless of any later availability flip.
     mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
     mockSnapshot.mockReturnValue({ documentProcessor: "available" });
     mockAvailable
       .mockReturnValueOnce(true) // resolver's check: route to Miyo
       .mockReturnValue(false); // any later check would say unavailable
     mockParseDoc.mockResolvedValue({ text: "extracted via miyo" });
-    const pdf4llm = jest.fn();
 
-    const parser = new PDFParser({ pdf4llm } as unknown as BrevilabsClient);
+    const parser = new PDFParser(undefined);
     const result = await parser.parseFile(pdf("solo"), asVault);
 
     expect(mockParseDoc).toHaveBeenCalledTimes(1);
     expect(result).toBe("extracted via miyo");
-    expect(pdf4llm).not.toHaveBeenCalled(); // no cloud fallback on the flip
   });
 
   it("does NOT refresh when status is already conclusive (no hot-path probe)", async () => {
@@ -259,22 +361,23 @@ describe("parse-boundary status refresh (field miyo, status unconclusive)", () =
     mockAvailable.mockReturnValue(true);
     mockParseDoc.mockResolvedValue({ text: "extracted" });
 
-    const parser = new PDFParser({ pdf4llm: jest.fn() } as unknown as BrevilabsClient);
+    const parser = new PDFParser(undefined);
     await parser.parseFile(pdf("solo"), asVault);
 
     expect(mockRefresh).not.toHaveBeenCalled();
   });
 
-  it("does NOT refresh when the field is 'plus' (never probes on the cloud path)", async () => {
-    mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "plus" }));
+  it("does NOT refresh when the field is a legacy non-miyo value (never probes the cache path)", async () => {
+    mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "plus" as unknown as "miyo" }));
     mockSnapshot.mockReturnValue({ documentProcessor: "unknown" });
-    const pdf4llm = jest.fn().mockResolvedValue({ response: "cloud pdf" });
 
-    const parser = new PDFParser({ pdf4llm } as unknown as BrevilabsClient);
+    const parser = new PDFParser(undefined);
     await parser.parseFile(pdf("solo"), asVault);
 
     expect(mockRefresh).not.toHaveBeenCalled();
-    expect(pdf4llm).toHaveBeenCalledTimes(1);
+    // The legacy route is cache → local-only error; no processor is contacted.
+    expect(mockPdfCacheGet).toHaveBeenCalledTimes(1);
+    expect(mockParseDoc).not.toHaveBeenCalled();
   });
 });
 
@@ -283,7 +386,6 @@ describe("Docs4LLMParser — EPUB routes locally like PDF", () => {
     mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
     mockAvailable.mockReturnValue(true);
     mockParseDoc.mockResolvedValue({ text: "epub text" });
-    const docs4llm = jest.fn();
 
     const parser = new Docs4LLMParser();
     const result = await parser.parseFile(epub("book"), asVault);
@@ -294,19 +396,16 @@ describe("Docs4LLMParser — EPUB routes locally like PDF", () => {
       "MyVault",
       "books/book.epub"
     );
-    expect(docs4llm).not.toHaveBeenCalled();
   });
 
-  it("fails closed for an EPUB when explicitly-chosen Miyo is unavailable (no cloud)", async () => {
+  it("fails closed for an EPUB when explicitly-chosen Miyo is unavailable", async () => {
     mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
     mockAvailable.mockReturnValue(false);
-    const docs4llm = jest.fn().mockResolvedValue({ response: "cloud epub" });
 
     const parser = new Docs4LLMParser();
 
     await expect(parser.parseFile(epub("book"), asVault)).rejects.toThrow(/Miyo.*is unavailable/);
     expect(mockParseDoc).not.toHaveBeenCalled();
-    expect(docs4llm).not.toHaveBeenCalled();
   });
 
   it("reports no processor for a non-{pdf,epub} format even when Miyo is available", async () => {
@@ -322,43 +421,27 @@ describe("Docs4LLMParser — EPUB routes locally like PDF", () => {
   });
 });
 
-describe("Docs4LLMParser — Quick Chat", () => {
-  it("parses an EPUB via Miyo", async () => {
-    mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
-    mockAvailable.mockReturnValue(true);
-    mockParseDoc.mockResolvedValue({ text: "epub text" });
-    const docs4llm = jest.fn();
-
-    const parser = new Docs4LLMParser();
-    const result = await parser.parseFile(epub("book"), asVault);
-
-    expect(result).toBe("epub text");
-    expect(mockParseDoc).toHaveBeenCalledWith(
-      "http://localhost:8742",
-      "MyVault",
-      "books/book.epub"
-    );
-    expect(docs4llm).not.toHaveBeenCalled();
-  });
-
-  it("fails closed for an EPUB when Miyo is unavailable", async () => {
-    mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "miyo" }));
-    mockAvailable.mockReturnValue(false);
-    const docs4llm = jest.fn().mockResolvedValue({ response: "cloud epub" });
-
-    const parser = new Docs4LLMParser();
-
-    await expect(parser.parseFile(epub("book"), asVault)).rejects.toThrow(/Miyo.*is unavailable/);
-    expect(docs4llm).not.toHaveBeenCalled();
-  });
-
-  it("reports no processor for a non-local format when the backend is Plus", async () => {
-    mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "plus" }));
+describe("Docs4LLMParser — legacy docProcessorBackend value", () => {
+  it("reports no processor for a non-local format without contacting any backend", async () => {
+    mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "plus" as unknown as "miyo" }));
 
     const parser = new Docs4LLMParser();
 
     await expect(parser.parseFile(docx("report"), asVault)).rejects.toThrow(
       /No document processor available/
     );
+    expect(mockRefresh).not.toHaveBeenCalled();
+    expect(mockParseDoc).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for an EPUB under a legacy field value (no local processor)", async () => {
+    mockGetSettings.mockReturnValue(settings({ docProcessorBackend: "plus" as unknown as "miyo" }));
+
+    const parser = new Docs4LLMParser();
+
+    await expect(parser.parseFile(epub("book"), asVault)).rejects.toThrow(
+      /No document processor available/
+    );
+    expect(mockParseDoc).not.toHaveBeenCalled();
   });
 });

@@ -6,6 +6,7 @@ import {
   providerRequiresApiKey,
 } from "@/modelManagement";
 import type { EnabledModelCredentialState, EnabledModelEntry } from "@/agentMode/session/types";
+import { isOpencodeZenWireId } from "@/lib/opencodeZenWireId";
 
 export interface OpencodeProviderMapping {
   /** The opencode provider id — leading segment of `<provider>/<model>`. */
@@ -16,38 +17,6 @@ export interface OpencodeProviderMapping {
    * config must NOT re-register it or inject a key.
    */
   native: boolean;
-}
-
-/** opencode provider id reserved for the Copilot Plus brevilabs proxy. */
-export const COPILOT_PLUS_OPENCODE_PROVIDER_ID = "copilot-plus";
-
-/**
- * The bare Copilot Plus model id behind an opencode wire id, or null for anything else.
- *
- * The prefix is the whole test for whether Copilot Plus caps apply to a session: a user
- * on their own API key reaches this same backend but is not metered by them, and must see
- * no cap meters. Other backends serving these models spell their wire ids differently, so
- * each strips its own prefix before asking the shared reader about the account.
- *
- * @param wireModelId - Model id as it travels to the agent, provider prefix included.
- */
-export function copilotPlusModelId(wireModelId: string | null | undefined): string | null {
-  const prefix = `${COPILOT_PLUS_OPENCODE_PROVIDER_ID}/`;
-  if (typeof wireModelId !== "string" || !wireModelId.startsWith(prefix)) return null;
-  return wireModelId.slice(prefix.length);
-}
-
-/**
- * opencode Zen — opencode's own hosted gateway provider. Its models carry the
- * `opencode/` wire-id prefix and make up opencode's free model tier. We surface
- * a privacy warning for them because, unlike a self-hosted/BYOK model, prompts
- * are sent to a third party whose terms may allow logging or training.
- */
-export const OPENCODE_ZEN_PROVIDER_ID = "opencode";
-
-/** `true` when a wire base id belongs to opencode Zen (`opencode/<model>`). */
-export function isOpencodeZenWireId(wireId: string): boolean {
-  return wireId.startsWith(`${OPENCODE_ZEN_PROVIDER_ID}/`);
 }
 
 /** See AGENTS.md → "Referential stability". */
@@ -74,8 +43,6 @@ export function mapProviderToOpencodeId(provider: Provider): OpencodeProviderMap
       }
       return null;
     }
-    case "copilot-plus":
-      return { id: COPILOT_PLUS_OPENCODE_PROVIDER_ID, native: false };
     case "agent":
       // An opencode-discovered provider's id is opencode's own provider id, and
       // opencode hosts the models — native, so no key/registration.

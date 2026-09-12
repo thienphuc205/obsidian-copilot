@@ -12,6 +12,7 @@ import {
   type SessionModeState,
   type SessionModelState,
   type SessionNotification,
+  type McpServer,
 } from "@agentclientprotocol/sdk";
 import { App, FileSystemAdapter } from "obsidian";
 import { AcpProcessManager, AcpProcessManagerOptions } from "./AcpProcessManager";
@@ -39,8 +40,8 @@ import type {
   SessionUpdateHandler as DomainSessionUpdateHandler,
   SessionUsage,
 } from "@/agentMode/session/types";
-import { wrapStreamsForDebug } from "./debugTap";
-import { AcpBackend } from "./types";
+import { redactSensitiveError, wrapStreamsForDebug } from "./debugTap";
+import type { AcpBackend, AcpMcpHttpServer, AcpSpawnDescriptor } from "./types";
 import {
   withoutExpiredWindows,
   type PlanUsage,
@@ -93,6 +94,62 @@ function isMethodNotFoundError(err: unknown): boolean {
 }
 
 const COPILOT_CLIENT_NAME = "obsidian-copilot";
+const EMPTY_MCP_SERVERS: McpServer[] = [];
+const EMPTY_REDACTION_SECRETS: readonly string[] = [];
+
+function isCredentialName(name: string): boolean {
+  const normalized = name.toLowerCase().replace(/[-_]/g, "");
+  return (
+    normalized === "authorization" ||
+    normalized === "proxyauthorization" ||
+    normalized === "token" ||
+    normalized.endsWith("token") ||
+    normalized.includes("apikey") ||
+    normalized.includes("secret") ||
+    normalized.includes("password") ||
+    normalized.includes("firecrawl") ||
+    normalized.endsWith("licensekey")
+  );
+}
+
+function collectRedactionSecrets(descriptor: AcpSpawnDescriptor): readonly string[] {
+  const secrets = new Set<string>();
+  const add = (value: unknown): void => {
+    if (typeof value === "string" && value.length > 0) secrets.add(value);
+  };
+
+  for (const server of descriptor.mcpServers ?? []) {
+    for (const header of server.headers) {
+      if (!isCredentialName(header.name)) continue;
+      add(header.value);
+      const bearer = /^\s*Bearer\s+(.+?)\s*$/i.exec(header.value);
+      if (bearer) add(bearer[1]);
+    }
+  }
+  for (const [name, value] of Object.entries(descriptor.env)) {
+    if (isCredentialName(name)) add(value);
+  }
+  for (let i = 0; i < descriptor.args.length; i++) {
+    const arg = descriptor.args[i];
+    const inline = /^--(?:token|bridge-token|authorization|api-key)=(.+)$/i.exec(arg);
+    if (inline) {
+      add(inline[1]);
+    } else if (/^--(?:token|bridge-token|authorization|api-key)$/i.test(arg)) {
+      add(descriptor.args[i + 1]);
+    }
+  }
+  return Array.from(secrets);
+}
+
+function toAcpMcpServers(servers: readonly AcpMcpHttpServer[] | undefined): McpServer[] {
+  if (!servers || servers.length === 0) return EMPTY_MCP_SERVERS;
+  return servers.map((server) => ({
+    type: server.type,
+    name: server.name,
+    url: server.url,
+    headers: server.headers.map(({ name, value }) => ({ name, value })),
+  }));
+}
 
 /**
  * Per-session bookkeeping for the latest known wire-shaped catalogs. We keep
@@ -104,6 +161,12 @@ interface SessionWireState {
   models: SessionModelState | null;
   modes: SessionModeState | null;
   configOptions: SessionConfigOption[] | null;
+}
+
+interface AcpRequestContext {
+  connection: ClientSideConnection;
+  generation: number;
+  redactionSecrets: readonly string[];
 }
 
 /**
@@ -133,7 +196,18 @@ function updateModelConfigOptionValue(
  */
 export class AcpBackendProcess implements BackendProcess {
   private process: AcpProcessManager | null = null;
+  private processExitUnsubscribe: (() => void) | null = null;
   private connection: ClientSideConnection | null = null;
+  private mcpServers: McpServer[] = EMPTY_MCP_SERVERS;
+  private mcpDispose: (() => Promise<void>) | null = null;
+  private mcpRedactionSecrets: readonly string[] = EMPTY_REDACTION_SECRETS;
+  // A generation invalidates a start that is still building or handshaking when
+  // shutdown begins. It is intentionally reusable: an explicit shutdown may be
+  // followed by a fresh start with a new descriptor/account.
+  private lifecycleGeneration = 0;
+  private startPromise: Promise<void> | null = null;
+  private shutdownPromise: Promise<void> | null = null;
+  private processShutdownPromise: Promise<void> | null = null;
   private readonly domainHandlers = new Map<SessionId, DomainSessionUpdateHandler>();
   /**
    * Per-session FIFO of `session/update` notifications that arrived before a
@@ -215,7 +289,33 @@ export class AcpBackendProcess implements BackendProcess {
    * no-op.
    */
   async start(): Promise<void> {
+    if (this.shutdownPromise) await this.shutdownPromise;
     if (this.connection) return;
+    if (this.startPromise) return this.startPromise;
+
+    const generation = ++this.lifecycleGeneration;
+    const startPromise = this.startInternal(generation);
+    const tracked = startPromise.then(
+      (value) => {
+        if (this.startPromise === tracked) this.startPromise = null;
+        return value;
+      },
+      (error) => {
+        if (this.startPromise === tracked) this.startPromise = null;
+        throw error;
+      }
+    );
+    this.startPromise = tracked;
+    return tracked;
+  }
+
+  private async startInternal(generation: number): Promise<void> {
+    const previousMcpDispose = this.mcpDispose;
+    if (previousMcpDispose) await previousMcpDispose();
+    if (this.lifecycleGeneration !== generation) {
+      throw new Error("AcpBackendProcess.start() cancelled during shutdown");
+    }
+    this.mcpServers = EMPTY_MCP_SERVERS;
     const adapter = this.app.vault.adapter;
     if (!(adapter instanceof FileSystemAdapter)) {
       throw new Error("Agent Mode requires desktop Obsidian (FileSystemAdapter).");
@@ -224,52 +324,134 @@ export class AcpBackendProcess implements BackendProcess {
       vaultBasePath: adapter.getBasePath(),
       vaultName: this.app.vault.getName(),
     });
-
-    const procOpts: AcpProcessManagerOptions = {
-      command: descriptor.command,
-      args: descriptor.args,
-      env: descriptor.env,
-      logTag: this.backend.id,
-    };
-    const proc = new AcpProcessManager(procOpts);
-    this.process = proc;
-    const raw = proc.start();
-    const { stdin, stdout } = wrapStreamsForDebug(raw.stdin, raw.stdout, this.backend.id);
-
-    proc.onExit(() => {
-      logWarn(`[AgentMode] backend ${this.backend.id} exited`);
-      this.connection = null;
-      this.domainHandlers.clear();
-      this.pendingUpdates.clear();
-      this.sessionWireState.clear();
-      this.todoToolCallIdsBySession.clear();
-      this.sawLiveUsage.clear();
-      this.loadSessionCollectors.clear();
-      this.permissionPrompter = null;
-      this.capabilities.clear();
-      // Dropped rather than kept: a backend that starts again may be pointed at
-      // different credentials, and a snapshot held across that would show the previous
-      // account's caps. The next chat to attach reads fresh.
-      this.lastPlanUsage = null;
-      this.planUsageReadQueued = false;
-      this.backendContextWindows.clear();
-      for (const fn of this.exitListeners) {
-        try {
-          fn();
-        } catch (e) {
-          logWarn("[AgentMode] exit listener threw", e);
-        }
+    const redactionSecrets = collectRedactionSecrets(descriptor);
+    if (this.lifecycleGeneration !== generation) {
+      try {
+        await descriptor.dispose?.();
+      } catch (error) {
+        logError(
+          "[AgentMode] late web MCP bridge cleanup failed for " + this.backend.id,
+          redactSensitiveError(error, redactionSecrets)
+        );
       }
-    });
+      throw new Error("AcpBackendProcess.start() cancelled during shutdown");
+    }
 
-    const stream = ndJsonStream(stdin, stdout);
-    const client = new VaultClient(this.app, {
-      onSessionUpdate: (sessionId, update) => this.routeSessionUpdate(sessionId, update),
-      requestPermission: (req) => this.handlePermission(req),
-    });
-    this.connection = new ClientSideConnection(() => client, stream);
+    let descriptorDisposal: Promise<void> | null = null;
+    const disposeDescriptor = (): Promise<void> => {
+      if (descriptorDisposal) return descriptorDisposal;
+      descriptorDisposal = (async () => {
+        try {
+          await descriptor.dispose?.();
+        } catch (error) {
+          // Cleanup errors must not expose bridge credentials or mask the
+          // subprocess failure that caused teardown.
+          logError(
+            "[AgentMode] web MCP bridge cleanup failed for " + this.backend.id,
+            redactSensitiveError(error, redactionSecrets)
+          );
+        }
+      })();
+      return descriptorDisposal;
+    };
+    let mcpDisposal: Promise<void> | null = null;
+    const disposeMcp = (): Promise<void> => {
+      if (mcpDisposal) return mcpDisposal;
+      mcpDisposal = (async () => {
+        if (this.mcpDispose === disposeMcp) {
+          this.mcpServers = EMPTY_MCP_SERVERS;
+          this.mcpRedactionSecrets = EMPTY_REDACTION_SECRETS;
+        }
+        await disposeDescriptor();
+        if (this.mcpDispose === disposeMcp) this.mcpDispose = null;
+      })();
+      return mcpDisposal;
+    };
+    this.mcpDispose = disposeMcp;
 
+    let proc: AcpProcessManager | null = null;
+    let initializationStarted = false;
     try {
+      this.mcpServers = toAcpMcpServers(descriptor.mcpServers);
+      this.mcpRedactionSecrets = redactionSecrets;
+      if (this.lifecycleGeneration !== generation) {
+        throw new Error("AcpBackendProcess.start() cancelled during shutdown");
+      }
+      const procOpts: AcpProcessManagerOptions = {
+        command: descriptor.command,
+        args: descriptor.args,
+        env: descriptor.env,
+        logTag: this.backend.id,
+        redactionSecrets,
+      };
+      const startedProc = new AcpProcessManager(procOpts);
+      proc = startedProc;
+      this.process = startedProc;
+      if (this.lifecycleGeneration !== generation) {
+        throw new Error("AcpBackendProcess.start() cancelled during shutdown");
+      }
+      const raw = startedProc.start();
+      const { stdin, stdout } = wrapStreamsForDebug(
+        raw.stdin,
+        raw.stdout,
+        this.backend.id,
+        redactionSecrets
+      );
+
+      const handleProcessExit = (): void => {
+        if (this.lifecycleGeneration !== generation || this.process !== startedProc) return;
+        this.detachProcessExitListener();
+        logWarn(`[AgentMode] backend ${this.backend.id} exited`);
+        this.connection = null;
+        this.mcpServers = EMPTY_MCP_SERVERS;
+        this.mcpRedactionSecrets = EMPTY_REDACTION_SECRETS;
+        void disposeMcp();
+        this.domainHandlers.clear();
+        this.pendingUpdates.clear();
+        this.sessionWireState.clear();
+        this.todoToolCallIdsBySession.clear();
+        this.sawLiveUsage.clear();
+        this.loadSessionCollectors.clear();
+        this.permissionPrompter = null;
+        this.capabilities.clear();
+        // Dropped rather than kept: a backend that starts again may be pointed at
+        // different credentials, and a snapshot held across that would show the previous
+        // account's caps. The next chat to attach reads fresh.
+        this.lastPlanUsage = null;
+        this.planUsageReadQueued = false;
+        this.backendContextWindows.clear();
+        const listeners = Array.from(this.exitListeners);
+        this.exitListeners.clear();
+        for (const fn of listeners) {
+          try {
+            fn();
+          } catch (e) {
+            logWarn("[AgentMode] exit listener threw", e);
+          }
+        }
+      };
+      this.processExitUnsubscribe = startedProc.onExit(handleProcessExit);
+
+      if (!startedProc.isRunning()) {
+        throw new Error("AcpBackendProcess subprocess exited before initialize");
+      }
+
+      const stream = ndJsonStream(stdin, stdout);
+      const client = new VaultClient(this.app, {
+        onSessionUpdate: (sessionId, update) => {
+          // A stream can deliver one final notification while shutdown and a
+          // subsequent restart are crossing. It belongs to the generation that
+          // created this client, never to the newly authenticated connection.
+          if (this.lifecycleGeneration !== generation) return;
+          this.routeSessionUpdate(sessionId, update, generation);
+        },
+        requestPermission: (req) =>
+          this.lifecycleGeneration === generation
+            ? this.handlePermission(req)
+            : Promise.resolve({ outcome: { outcome: "cancelled" } }),
+      });
+      this.connection = new ClientSideConnection(() => client, stream);
+      initializationStarted = true;
       const init = await this.connection.initialize({
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {
@@ -280,6 +462,12 @@ export class AcpBackendProcess implements BackendProcess {
           version: this.clientVersion,
         },
       });
+      if (this.lifecycleGeneration !== generation) {
+        throw new Error("AcpBackendProcess.start() cancelled during shutdown");
+      }
+      if (!startedProc.isRunning()) {
+        throw new Error("AcpBackendProcess subprocess exited during initialize");
+      }
       if (init.agentCapabilities?.sessionCapabilities?.list != null) {
         this.capabilities.set("session/list", true);
       }
@@ -300,18 +488,32 @@ export class AcpBackendProcess implements BackendProcess {
         `[AgentMode] initialized backend ${this.backend.id} (negotiated protocol v${init.protocolVersion}, listSessions=${this.hasCapability("session/list")}, resumeSession=${this.hasCapability("session/resume")}, loadSession=${this.hasCapability("session/load")}, additionalDirectories=${this.hasCapability("session/additional_directories")})`
       );
     } catch (err) {
-      logError(
-        `[AgentMode] initialize failed for ${this.backend.id}; tearing down subprocess`,
-        err
-      );
-      this.connection = null;
-      try {
-        await proc.shutdown();
-      } catch (e) {
-        logError("[AgentMode] shutdown after failed initialize threw", e);
+      const safeError = redactSensitiveError(err, redactionSecrets);
+      if (initializationStarted) {
+        logError(
+          `[AgentMode] initialize failed for ${this.backend.id}; tearing down subprocess`,
+          safeError
+        );
       }
-      this.process = null;
-      throw err;
+      if (this.lifecycleGeneration === generation) {
+        this.connection = null;
+        this.mcpServers = EMPTY_MCP_SERVERS;
+        this.mcpRedactionSecrets = EMPTY_REDACTION_SECRETS;
+      }
+      await disposeMcp();
+      if (proc && this.process === proc) {
+        this.detachProcessExitListener();
+        try {
+          await this.shutdownProcess(proc);
+        } catch (error) {
+          logError(
+            "[AgentMode] shutdown after failed start threw",
+            redactSensitiveError(error, redactionSecrets)
+          );
+        }
+        this.process = null;
+      }
+      throw safeError;
     }
   }
 
@@ -374,12 +576,14 @@ export class AcpBackendProcess implements BackendProcess {
   }
 
   async newSession(params: OpenSessionInput): Promise<OpenSessionOutput> {
+    const request = this.captureRequestContext();
     const req: NewSessionRequest = {
       cwd: params.cwd,
-      mcpServers: [],
+      mcpServers: this.mcpServers,
       ...this.additionalDirectoriesField(params.additionalDirectories),
     };
-    const wireResp = await this.requireConnection().newSession(req);
+    const wireResp = await this.runAcpRequest((connection) => connection.newSession(req), request);
+    this.assertCurrentRequest(request);
     this.recordWireState(wireResp.sessionId, {
       models: wireResp.models ?? null,
       modes: wireResp.modes ?? null,
@@ -392,10 +596,16 @@ export class AcpBackendProcess implements BackendProcess {
   }
 
   async prompt(params: PromptInput): Promise<PromptOutput> {
-    const resp = await this.requireConnection().prompt({
-      sessionId: sessionIdToAcp(params.sessionId),
-      prompt: promptContentToAcp(params.prompt),
-    });
+    const request = this.captureRequestContext();
+    const resp = await this.runAcpRequest(
+      (connection) =>
+        connection.prompt({
+          sessionId: sessionIdToAcp(params.sessionId),
+          prompt: promptContentToAcp(params.prompt),
+        }),
+      request
+    );
+    this.assertCurrentRequest(request);
     // Fallback usage source for agents that never push a live `usage_update`
     // notification: the prompt result may carry a turn `usage` with no context
     // window. `usage.totalTokens` is a cumulative session total (not current
@@ -407,20 +617,23 @@ export class AcpBackendProcess implements BackendProcess {
       const handler = this.domainHandlers.get(params.sessionId);
       if (handler) {
         handler(
-          this.withBackendContextWindow({
-            sessionId: params.sessionId,
-            update: {
-              sessionUpdate: "usage_update",
-              usage: {
-                usedTokens: usage.totalTokens,
-                inputTokens: usage.inputTokens,
-                outputTokens: usage.outputTokens,
-                cacheReadTokens: usage.cachedReadTokens ?? undefined,
-                cacheWriteTokens: usage.cachedWriteTokens ?? undefined,
-                updatedAt: Date.now(),
+          this.withBackendContextWindow(
+            {
+              sessionId: params.sessionId,
+              update: {
+                sessionUpdate: "usage_update",
+                usage: {
+                  usedTokens: usage.totalTokens,
+                  inputTokens: usage.inputTokens,
+                  outputTokens: usage.outputTokens,
+                  cacheReadTokens: usage.cachedReadTokens ?? undefined,
+                  cacheWriteTokens: usage.cachedWriteTokens ?? undefined,
+                  updatedAt: Date.now(),
+                },
               },
             },
-          })
+            request.generation
+          )
         );
       }
     }
@@ -452,7 +665,8 @@ export class AcpBackendProcess implements BackendProcess {
       this.planUsageReadQueued = true;
       return this.planUsageRead;
     }
-    this.planUsageRead = this.readAndPublishPlanUsage().finally(() => {
+    const generation = this.lifecycleGeneration;
+    this.planUsageRead = this.readAndPublishPlanUsage(generation).finally(() => {
       this.planUsageRead = null;
       if (this.planUsageReadQueued) {
         this.planUsageReadQueued = false;
@@ -462,18 +676,22 @@ export class AcpBackendProcess implements BackendProcess {
     return this.planUsageRead;
   }
 
-  private async readAndPublishPlanUsage(): Promise<void> {
+  private async readAndPublishPlanUsage(generation: number): Promise<void> {
     if (!this.backend.readPlanUsage) return;
+    const redactionSecrets = this.mcpRedactionSecrets;
     let reading: PlanUsageReading;
     try {
       reading = await this.backend.readPlanUsage();
     } catch (e) {
-      logWarn(`[AgentMode] ${this.backend.id} plan usage read threw`, e);
+      logWarn(
+        `[AgentMode] ${this.backend.id} plan usage read threw`,
+        redactSensitiveError(e, redactionSecrets)
+      );
       return;
     }
     // Shut down (or exited) while the read was in flight: the answer describes an
     // account the next start() may no longer be on, so it must not outlive the reset.
-    if (!this.connection) return;
+    if (this.lifecycleGeneration !== generation || !this.connection) return;
     if (reading.kind === "unavailable") return;
     this.lastPlanUsage = reading.kind === "usage" ? reading.planUsage : null;
     for (const [sessionId, handler] of this.domainHandlers) {
@@ -516,7 +734,7 @@ export class AcpBackendProcess implements BackendProcess {
   }
 
   async cancel(params: CancelInput): Promise<void> {
-    return this.requireConnection().cancel(cancelInputToAcp(params));
+    return this.runAcpRequest((connection) => connection.cancel(cancelInputToAcp(params)));
   }
 
   hasCapability(cap: AcpCapability): boolean {
@@ -543,12 +761,18 @@ export class AcpBackendProcess implements BackendProcess {
   }
 
   async setSessionModel(params: { sessionId: SessionId; modelId: string }): Promise<BackendState> {
-    await this.dispatchCapability("session/set_model", (c) =>
-      c.unstable_setSessionModel({
-        sessionId: sessionIdToAcp(params.sessionId),
-        modelId: params.modelId,
-      })
+    const request = this.captureRequestContext();
+    await this.dispatchCapability(
+      "session/set_model",
+      (c) =>
+        c.unstable_setSessionModel({
+          sessionId: sessionIdToAcp(params.sessionId),
+          modelId: params.modelId,
+        }),
+      {},
+      request
     );
+    this.assertCurrentRequest(request);
     const wire = this.sessionWireState.get(params.sessionId);
     if (wire) {
       if (wire.models) {
@@ -571,12 +795,18 @@ export class AcpBackendProcess implements BackendProcess {
   }
 
   async setSessionMode(params: { sessionId: SessionId; modeId: string }): Promise<BackendState> {
-    await this.dispatchCapability("session/set_mode", (c) =>
-      c.setSessionMode({
-        sessionId: sessionIdToAcp(params.sessionId),
-        modeId: params.modeId,
-      })
+    const request = this.captureRequestContext();
+    await this.dispatchCapability(
+      "session/set_mode",
+      (c) =>
+        c.setSessionMode({
+          sessionId: sessionIdToAcp(params.sessionId),
+          modeId: params.modeId,
+        }),
+      {},
+      request
     );
+    this.assertCurrentRequest(request);
     const wire = this.sessionWireState.get(params.sessionId);
     if (wire) {
       const seed: SessionModeState = wire.modes ?? { availableModes: [], currentModeId: "" };
@@ -594,13 +824,19 @@ export class AcpBackendProcess implements BackendProcess {
     configId: string;
     value: string;
   }): Promise<BackendState> {
-    const resp = await this.dispatchCapability("session/set_config_option", (c) =>
-      c.setSessionConfigOption({
-        sessionId: sessionIdToAcp(params.sessionId),
-        configId: params.configId,
-        value: params.value,
-      })
+    const request = this.captureRequestContext();
+    const resp = await this.dispatchCapability(
+      "session/set_config_option",
+      (c) =>
+        c.setSessionConfigOption({
+          sessionId: sessionIdToAcp(params.sessionId),
+          configId: params.configId,
+          value: params.value,
+        }),
+      {},
+      request
     );
+    this.assertCurrentRequest(request);
     const wire = this.sessionWireState.get(params.sessionId);
     if (wire) {
       wire.configOptions = resp.configOptions;
@@ -623,22 +859,26 @@ export class AcpBackendProcess implements BackendProcess {
   private async dispatchCapability<T>(
     capability: AcpCapability,
     run: (c: ClientSideConnection) => Promise<T>,
-    opts: { mustBeAdvertised?: boolean } = {}
+    opts: { mustBeAdvertised?: boolean } = {},
+    request?: AcpRequestContext
   ): Promise<T> {
     const known = this.capabilities.get(capability);
     if (known === false || (opts.mustBeAdvertised && known !== true)) {
       throw new MethodUnsupportedError(capability);
     }
+    const activeRequest = request ?? this.captureRequestContext();
     try {
-      const resp = await run(this.requireConnection());
+      const resp = await run(activeRequest.connection);
+      this.assertCurrentRequest(activeRequest);
       this.capabilities.set(capability, true);
       return resp;
     } catch (err) {
-      if (isMethodNotFoundError(err)) {
-        this.capabilities.set(capability, false);
+      const safeError = redactSensitiveError(err, activeRequest.redactionSecrets);
+      if (isMethodNotFoundError(safeError)) {
+        if (this.isCurrentRequest(activeRequest)) this.capabilities.set(capability, false);
         throw new MethodUnsupportedError(capability);
       }
-      throw err;
+      throw safeError;
     }
   }
 
@@ -665,17 +905,20 @@ export class AcpBackendProcess implements BackendProcess {
   }
 
   async resumeSession(params: ResumeSessionInput): Promise<ResumeSessionOutput> {
+    const request = this.captureRequestContext();
     const wireResp = await this.dispatchCapability(
       "session/resume",
       (c) =>
         c.resumeSession({
           sessionId: sessionIdToAcp(params.sessionId),
           cwd: params.cwd,
-          mcpServers: [],
+          mcpServers: this.mcpServers,
           ...this.additionalDirectoriesField(params.additionalDirectories),
         }),
-      { mustBeAdvertised: true }
+      { mustBeAdvertised: true },
+      request
     );
+    this.assertCurrentRequest(request);
     this.recordWireState(sessionIdToAcp(params.sessionId), {
       models: wireResp.models ?? null,
       modes: wireResp.modes ?? null,
@@ -689,6 +932,7 @@ export class AcpBackendProcess implements BackendProcess {
 
   async loadSession(params: LoadSessionInput): Promise<LoadSessionOutput> {
     const sessionId = params.sessionId;
+    const request = this.captureRequestContext();
     // Installed before the request goes out: the agent replays the conversation
     // while it is in flight, so a collector added afterwards would miss it.
     const collector = createReplayTranscriptState();
@@ -701,11 +945,13 @@ export class AcpBackendProcess implements BackendProcess {
           c.loadSession({
             sessionId: sessionIdToAcp(sessionId),
             cwd: params.cwd,
-            mcpServers: [],
+            mcpServers: this.mcpServers,
             ...this.additionalDirectoriesField(params.additionalDirectories),
           }),
-        { mustBeAdvertised: true }
+        { mustBeAdvertised: true },
+        request
       );
+      this.assertCurrentRequest(request);
       this.recordWireState(sessionIdToAcp(sessionId), {
         models: wireResp.models ?? null,
         modes: wireResp.modes ?? null,
@@ -740,27 +986,67 @@ export class AcpBackendProcess implements BackendProcess {
   }
 
   async shutdown(): Promise<void> {
-    this.connection = null;
-    this.domainHandlers.clear();
-    this.pendingUpdates.clear();
-    this.sessionWireState.clear();
-    this.todoToolCallIdsBySession.clear();
-    this.loadSessionCollectors.clear();
-    this.sawLiveUsage.clear();
-    this.permissionPrompter = null;
-    this.capabilities.clear();
-    // Same reasoning as the exit handler: the next start() may authenticate as a
-    // different account, so nothing about this one may survive the restart.
-    this.lastPlanUsage = null;
-    this.backendContextWindows.clear();
-    if (this.process) {
-      try {
-        await this.process.shutdown();
-      } catch (e) {
-        logError("[AgentMode] backend shutdown failed", e);
+    if (this.shutdownPromise) return this.shutdownPromise;
+
+    // Invalidate a start before awaiting any teardown. `startInternal` checks
+    // this generation after descriptor construction and initialize, so no late
+    // child can become manager-owned after shutdown has begun.
+    this.lifecycleGeneration++;
+    // A descriptor build can be uncancellable. Detach that logical start now
+    // so an explicit restart after shutdown is not deduped onto a promise that
+    // may never settle; its late continuation is still generation-guarded.
+    this.startPromise = null;
+    const process = this.process;
+    const disposeMcp = this.mcpDispose;
+    const redactionSecrets = this.mcpRedactionSecrets;
+    const operation = (async () => {
+      this.connection = null;
+      this.detachProcessExitListener();
+      this.mcpServers = EMPTY_MCP_SERVERS;
+      this.mcpRedactionSecrets = EMPTY_REDACTION_SECRETS;
+      this.exitListeners.clear();
+      this.domainHandlers.clear();
+      this.pendingUpdates.clear();
+      this.sessionWireState.clear();
+      this.todoToolCallIdsBySession.clear();
+      this.loadSessionCollectors.clear();
+      this.sawLiveUsage.clear();
+      this.permissionPrompter = null;
+      this.capabilities.clear();
+      // Same reasoning as the exit handler: the next start() may authenticate as a
+      // different account, so nothing about this one may survive the restart.
+      this.lastPlanUsage = null;
+      this.backendContextWindows.clear();
+
+      if (disposeMcp) await disposeMcp();
+      if (process) {
+        try {
+          await this.shutdownProcess(process);
+        } catch (error) {
+          logError(
+            "[AgentMode] backend shutdown failed",
+            redactSensitiveError(error, redactionSecrets)
+          );
+        }
+        if (this.process === process) this.process = null;
       }
-      this.process = null;
-    }
+      // A descriptor build or initialize may still be pending. Do not await
+      // that logical start: descriptor construction has no cancellation
+      // contract and may never settle. The generation check in startInternal
+      // prevents adoption and disposes a late descriptor exactly once.
+    })();
+    const tracked = operation.then(
+      (value) => {
+        if (this.shutdownPromise === tracked) this.shutdownPromise = null;
+        return value;
+      },
+      (error) => {
+        if (this.shutdownPromise === tracked) this.shutdownPromise = null;
+        throw error;
+      }
+    );
+    this.shutdownPromise = tracked;
+    return tracked;
   }
 
   private requireConnection(): ClientSideConnection {
@@ -772,6 +1058,68 @@ export class AcpBackendProcess implements BackendProcess {
       );
     }
     return this.connection;
+  }
+
+  private captureRequestContext(): AcpRequestContext {
+    return {
+      connection: this.requireConnection(),
+      generation: this.lifecycleGeneration,
+      redactionSecrets: this.mcpRedactionSecrets,
+    };
+  }
+
+  private isCurrentRequest(request: AcpRequestContext): boolean {
+    return (
+      this.lifecycleGeneration === request.generation && this.connection === request.connection
+    );
+  }
+
+  private assertCurrentRequest(request: AcpRequestContext): void {
+    if (!this.isCurrentRequest(request)) {
+      throw new Error("AcpBackendProcess request completed after lifecycle changed");
+    }
+  }
+
+  /**
+   * Copy errors at the ACP boundary before any session/UI layer can log them.
+   * Capture the generation's secrets before awaiting: shutdown clears the live
+   * descriptor immediately, but a late SDK rejection still must not echo it.
+   */
+  private async runAcpRequest<T>(
+    run: (connection: ClientSideConnection) => Promise<T>,
+    request?: AcpRequestContext
+  ): Promise<T> {
+    const activeRequest = request ?? this.captureRequestContext();
+    try {
+      const response = await run(activeRequest.connection);
+      this.assertCurrentRequest(activeRequest);
+      return response;
+    } catch (error) {
+      throw redactSensitiveError(error, activeRequest.redactionSecrets);
+    }
+  }
+
+  private shutdownProcess(proc: AcpProcessManager): Promise<void> {
+    if (this.processShutdownPromise) return this.processShutdownPromise;
+    const operation = Promise.resolve().then(() => proc.shutdown());
+    const tracked = operation.then(
+      (value) => {
+        if (this.processShutdownPromise === tracked) this.processShutdownPromise = null;
+        return value;
+      },
+      (error) => {
+        if (this.processShutdownPromise === tracked) this.processShutdownPromise = null;
+        throw error;
+      }
+    );
+    this.processShutdownPromise = tracked;
+    return tracked;
+  }
+
+  private detachProcessExitListener(): void {
+    const unsubscribe = this.processExitUnsubscribe;
+    this.processExitUnsubscribe = null;
+    unsubscribe?.();
   }
 
   private recordWireState(sessionId: AcpSessionId, wire: SessionWireState): void {
@@ -801,7 +1149,12 @@ export class AcpBackendProcess implements BackendProcess {
     return acpStateToBackendState(wire.models, wire.modes, wire.configOptions, this.descriptor);
   }
 
-  private routeSessionUpdate(acpSessionId: AcpSessionId, update: SessionNotification): void {
+  private routeSessionUpdate(
+    acpSessionId: AcpSessionId,
+    update: SessionNotification,
+    generation: number
+  ): void {
+    if (this.lifecycleGeneration !== generation) return;
     const sessionId = sessionIdFromAcp(acpSessionId);
 
     // If there's an active loadSession collector for this session, feed it
@@ -872,7 +1225,7 @@ export class AcpBackendProcess implements BackendProcess {
     }
 
     for (const event of acpNotificationToEvents(update, this.todoToolCallIdsFor(sessionId)))
-      handler(this.withBackendContextWindow(event));
+      handler(this.withBackendContextWindow(event, generation));
   }
 
   /**
@@ -881,7 +1234,7 @@ export class AcpBackendProcess implements BackendProcess {
    * window is already known; the first windowless snapshot for a model triggers the
    * async read instead, and is republished once the answer arrives.
    */
-  private withBackendContextWindow(event: SessionEvent): SessionEvent {
+  private withBackendContextWindow(event: SessionEvent, generation: number): SessionEvent {
     if (!this.backend.readContextWindow) return event;
     if (event.update.sessionUpdate !== "usage_update") return event;
     const usage = event.update.usage;
@@ -890,7 +1243,7 @@ export class AcpBackendProcess implements BackendProcess {
     if (!wireModelId) return event;
     const known = this.backendContextWindows.get(wireModelId);
     if (known === undefined) {
-      void this.resolveBackendContextWindow(event.sessionId, wireModelId, usage);
+      void this.resolveBackendContextWindow(event.sessionId, wireModelId, usage, generation);
       return event;
     }
     return {
@@ -910,16 +1263,35 @@ export class AcpBackendProcess implements BackendProcess {
    * session.
    */
   async readContextWindow(wireModelId: string | null | undefined): Promise<number | null> {
-    if (!wireModelId || !this.backend.readContextWindow) return null;
+    const generation = this.lifecycleGeneration;
+    if (!wireModelId || !this.backend.readContextWindow || !this.connection) return null;
+    return this.readContextWindowForGeneration(wireModelId, generation);
+  }
+
+  private async readContextWindowForGeneration(
+    wireModelId: string,
+    generation: number
+  ): Promise<number | null> {
+    if (
+      this.lifecycleGeneration !== generation ||
+      !this.connection ||
+      !this.backend.readContextWindow
+    )
+      return null;
     const known = this.backendContextWindows.get(wireModelId);
     if (known !== undefined) return known;
+    const redactionSecrets = this.mcpRedactionSecrets;
     let contextWindow: number | null;
     try {
       contextWindow = (await this.backend.readContextWindow(wireModelId)) ?? null;
     } catch (e) {
-      logWarn(`[AgentMode] ${this.backend.id} context window read threw for ${wireModelId}`, e);
+      logWarn(
+        `[AgentMode] ${this.backend.id} context window read threw for ${wireModelId}`,
+        redactSensitiveError(e, redactionSecrets)
+      );
       return null;
     }
+    if (this.lifecycleGeneration !== generation || !this.connection) return null;
     if (contextWindow) this.backendContextWindows.set(wireModelId, contextWindow);
     return contextWindow;
   }
@@ -927,13 +1299,16 @@ export class AcpBackendProcess implements BackendProcess {
   private async resolveBackendContextWindow(
     sessionId: SessionId,
     wireModelId: string,
-    usage: SessionUsage
+    usage: SessionUsage,
+    generation: number
   ): Promise<void> {
-    const contextWindow = await this.readContextWindow(wireModelId);
+    if (this.lifecycleGeneration !== generation || !this.connection) return;
+    const contextWindow = await this.readContextWindowForGeneration(wireModelId, generation);
     if (!contextWindow) return;
     // The session may have switched models while the catalog answered. Republishing the
     // old model's snapshot now would hand AgentSession a windowed reading it treats as
     // authoritative — re-freezing the very ring its model-change handling just cleared.
+    if (this.lifecycleGeneration !== generation || !this.connection) return;
     if (this.currentWireModelId(sessionId) !== wireModelId) return;
     // Republish the snapshot that arrived windowless so the ring fills in now rather
     // than on the next usage report.

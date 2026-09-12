@@ -1,14 +1,13 @@
 // src/components/SourcesModal.tsx
+import { resolveSourceInspectorTarget, type SourceReference } from "@/context/sourceReferences";
 import { logError } from "@/logger";
+import { openSourceReference } from "@/utils/openSourceReference";
 import { App, Modal, Setting, TFile } from "obsidian";
 
 export class SourcesModal extends Modal {
-  sources: { title: string; path: string; score: number; explanation?: unknown }[];
+  sources: SourceReference[];
 
-  constructor(
-    app: App,
-    sources: { title: string; path: string; score: number; explanation?: unknown }[]
-  ) {
+  constructor(app: App, sources: SourceReference[]) {
     super(app);
     this.sources = sources;
   }
@@ -22,10 +21,7 @@ export class SourcesModal extends Modal {
     this.createSourceList(contentEl, this.sources);
   }
 
-  private createSourceList(
-    container: HTMLElement,
-    sources: { title: string; path: string; score: number; explanation?: unknown }[]
-  ) {
+  private createSourceList(container: HTMLElement, sources: SourceReference[]) {
     const list = container.createEl("ul");
     list.addClass("tw-list-none", "tw-p-0");
 
@@ -48,14 +44,27 @@ export class SourcesModal extends Modal {
           ? `${source.title} (${source.path})`
           : source.title;
 
+      const resolvedTarget = resolveSourceInspectorTarget(source);
       const link = itemContainer.createEl("a", {
-        href: `obsidian://open?vault=${encodeURIComponent(this.app.vault.getName())}&file=${encodeURIComponent(source.path || source.title)}`,
+        href:
+          resolvedTarget?.kind === "web"
+            ? resolvedTarget.url
+            : resolvedTarget?.kind === "vault"
+              ? `obsidian://open?vault=${encodeURIComponent(this.app.vault.getName())}&file=${encodeURIComponent(resolvedTarget.path)}`
+              : "#",
         text: displayText,
       });
+      link.setAttr("data-source-kind", resolvedTarget?.kind ?? "invalid");
+      link.setAttr("aria-label", `Open source: ${displayText}`);
+      if (resolvedTarget?.kind === "web") {
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+      }
       link.title = `${displayText} - drag to insert wikilink`;
-      link.draggable = true;
+      link.draggable = resolvedTarget?.kind === "vault";
       link.addEventListener("dragstart", (e) => {
-        const filePath = source.path || source.title;
+        if (resolvedTarget?.kind !== "vault") return;
+        const filePath = resolvedTarget.path;
         const file = this.app.vault.getAbstractFileByPath(filePath);
         if (file instanceof TFile) {
           const dragManager = (
@@ -75,8 +84,7 @@ export class SourcesModal extends Modal {
       link.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        // Use the path if available, otherwise fall back to title
-        this.app.workspace.openLinkText(source.path || source.title, "").catch(logError);
+        void openSourceReference(this.app, source).catch(logError);
       });
 
       // Display with 4 decimals to match SearchCore logs and avoid apparent ties

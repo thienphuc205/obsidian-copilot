@@ -13,10 +13,9 @@ jest.mock("@/settings/model", () => ({
 
 // Entitlement surface. Eligible by default so the sub-section fields aren't
 // blocked by the toggle's own gating.
-let mockEligible: boolean | undefined = true;
-jest.mock("@/plusUtils", () => ({
+jest.mock("@/LLMProviders/selfHostMode", () => ({
   // eslint-disable-next-line @eslint-react/hooks-extra/no-unnecessary-use-prefix -- mocks the real hook
-  useIsSelfHostEligible: () => mockEligible,
+  useIsSelfHostEligible: () => true,
 }));
 
 jest.mock("@/contexts/TabContext", () => ({
@@ -36,7 +35,6 @@ const enableToggle = () => screen.getByRole("switch");
 describe("SelfHostSettings", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    mockEligible = true;
     currentSettings = { ...DEFAULT_SETTINGS };
   });
 
@@ -148,23 +146,7 @@ describe("SelfHostSettings", () => {
     expect(updateSetting).toHaveBeenCalledWith("enableSelfHostMode", true);
   });
 
-  it.each([
-    ["the entitlement does not grant self-host", false],
-    ["the entitlement check has not settled yet", undefined],
-  ])("ignores clicks on the enable toggle while %s", (_case, eligible) => {
-    mockEligible = eligible;
-    render(<SelfHostSettings />);
-
-    expect(enableToggle().getAttribute("aria-disabled")).toBe("true");
-    fireEvent.click(enableToggle());
-    expect(updateSetting).not.toHaveBeenCalledWith("enableSelfHostMode", true);
-  });
-
-  it("lets an ineligible user turn self-host mode back off", () => {
-    // A token that stops verifying leaves the preference on (it is not an
-    // authoritative "not entitled"), so gating this direction too would strand
-    // the user with self-host stuck on and the toggle unreachable.
-    mockEligible = false;
+  it("lets the user turn self-host mode back off", () => {
     setSettings({ enableSelfHostMode: true });
     render(<SelfHostSettings />);
 

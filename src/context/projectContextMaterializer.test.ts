@@ -15,13 +15,16 @@ jest.mock("@/search/searchUtils", () => ({
   getMatchingPatterns: jest.fn(),
   shouldIndexFile: jest.fn(() => true),
 }));
-jest.mock("@/LLMProviders/brevilabsClient", () => ({
-  BrevilabsClient: { getInstance: jest.fn() },
+// The signature helper pulls "@/utils" in transitively (via the Copilot folder
+// settings); the real module is out of this suite's scope, so stub the one
+// function the reachable paths need.
+jest.mock("@/utils", () => ({
+  ensureFolderExists: jest.fn(async () => undefined),
 }));
 
-import { BrevilabsClient } from "@/LLMProviders/brevilabsClient";
 import { getCachedProjectRecordById } from "@/projects/state";
 import { getMatchingPatterns, shouldIndexFile } from "@/search/searchUtils";
+import { cacheFileName } from "./contextCacheStore";
 import {
   ensureProjectContextMaterialized,
   materializeProjectContextSource,
@@ -31,17 +34,27 @@ import {
 const getRecord = getCachedProjectRecordById as jest.Mock;
 const getPatterns = getMatchingPatterns as jest.Mock;
 const indexFile = shouldIndexFile as jest.Mock;
-const getClient = BrevilabsClient.getInstance as jest.Mock;
 
 const CWD = "/vault/Proj";
-// Cache writes go to the SHARED off-vault cache now (node-fs backed, mocked here
-// by the in-memory `mockFs`). The store receives cache-root-relative dirs
-// derived by the materializer: `remotes/`, `files/`, and a per-project
-// `markers/<md5(projectId)>/`. The agent-facing absolute folder/note paths still
-// come from `getFullPath` and are asserted as `/vault/...` below — unchanged.
+// Cache writes go to the SHARED off-vault cache (node-fs backed, mocked here by
+// the in-memory `mockFs`). The store receives cache-root-relative dirs derived by
+// the materializer: `remotes/`, `files/`, and a per-project `markers/<md5(projectId)>/`.
+// The agent-facing absolute folder/note paths still come from `getFullPath` and
+// are asserted as `/vault/...` below.
+
+/**
+ * Optional in-flight gate. When set, the in-memory fs AWAITS `promise` before
+ * reading/writing any path `match` accepts — the knob that used to be a gated
+ * relay fetch, letting a test hold one source's read-decide-write mid-flight
+ * inside the per-artifact lock.
+ */
+let fsGate: { match: (p: string) => boolean; promise: Promise<void> } | null = null;
 
 function memFs(): ContextCacheFs & { files: Map<string, string> } {
   const files = new Map<string, string>();
+  const gated = async (p: string) => {
+    if (fsGate && fsGate.match(p)) await fsGate.promise;
+  };
   return {
     files,
     exists: async (p) => files.has(p),
@@ -54,10 +67,14 @@ function memFs(): ContextCacheFs & { files: Map<string, string> } {
         .filter((n) => !n.includes("/"));
     },
     readText: async (p) => {
+      await gated(p);
       if (!files.has(p)) throw new Error(`ENOENT: ${p}`);
       return files.get(p)!;
     },
-    writeText: async (p, c) => void files.set(p, c),
+    writeText: async (p, c) => {
+      await gated(p);
+      files.set(p, c);
+    },
     remove: async (p) => void files.delete(p),
   };
 }
@@ -101,15 +118,11 @@ function fakeApp(files: Array<{ path: string; ext: string }> = [], folders: stri
 
 beforeEach(() => {
   mockFs = memFs();
+  fsGate = null;
   jest.clearAllMocks();
   getPatterns.mockReturnValue(patterns());
   // Reset the default so a per-test property matcher override never leaks forward.
   indexFile.mockReturnValue(true);
-  getClient.mockReturnValue({
-    url4llm: jest.fn(async () => ({ response: "url text" })),
-    youtube4llm: jest.fn(async () => ({ response: { transcript: "yt text" } })),
-    docs4llm: jest.fn(async () => ({ response: "pdf text" })),
-  });
 });
 
 describe("ensureProjectContextMaterialized", () => {
@@ -135,7 +148,7 @@ describe("ensureProjectContextMaterialized", () => {
     expect(mockFs.files.size).toBe(0);
   });
 
-  it("materializes a web URL into the shared remotes dir and inlines it in the context block", async () => {
+  it("marks a web URL source failed (no local converter) and still lists it in the block", async () => {
     getRecord.mockReturnValue(record({ webUrls: "https://example.com" }));
     const result = await ensureProjectContextMaterialized(fakeApp(), "p1", CWD);
 
@@ -143,10 +156,9 @@ describe("ensureProjectContextMaterialized", () => {
     expect(result.projectContextBlock).toContain("https://example.com");
     // No manifest file is written anywhere — context is inline in the prompt.
     expect([...mockFs.files.keys()].some((k) => k.endsWith("CONTEXT.md"))).toBe(false);
-    // The snapshot lands under the shared `remotes/` dir, not a project dir.
-    const cacheFile = [...mockFs.files.keys()].find((k) => k.startsWith("remotes/web-"));
-    expect(cacheFile).toBeDefined();
-    expect(mockFs.files.get(cacheFile!)).toContain("url text");
+    // The conversion has no local provider: no snapshot, but a failure marker.
+    expect([...mockFs.files.keys()].some((k) => k.startsWith("remotes/web-"))).toBe(false);
+    expect([...mockFs.files.keys()].some((k) => k.includes("failed-web-"))).toBe(true);
   });
 
   it("reports only out-of-cwd folder inclusions as additional directories", async () => {
@@ -241,22 +253,7 @@ describe("ensureProjectContextMaterialized", () => {
     expect(result.projectContextBlock).not.toContain("## Included notes");
   });
 
-  it("lists a note matched by BOTH a note inclusion and a property only once", async () => {
-    getRecord.mockReturnValue(record({ inclusions: "[[Relativity]],[Topics:Physics]" }));
-    getPatterns.mockReturnValue(
-      patterns({ notePatterns: ["[[Relativity]]"], propertyPatterns: ["[Topics:Physics]"] })
-    );
-    const app = fakeApp([{ path: "Notes/Relativity.md", ext: "md" }]);
-    indexFile.mockReturnValue(true); // the note also matches the property
-
-    const result = await ensureProjectContextMaterialized(app, "p1", CWD);
-
-    const block = result.projectContextBlock ?? "";
-    const occurrences = block.split("`/vault/Notes/Relativity.md`").length - 1;
-    expect(occurrences).toBe(1);
-  });
-
-  it("materializes in-vault PDFs but ignores markdown files", async () => {
+  it("marks non-text in-vault files failed but ignores markdown files", async () => {
     getRecord.mockReturnValue(record({ inclusions: "Proj" }));
     getPatterns.mockReturnValue(patterns({ folderPatterns: ["Proj"] }));
     const app = fakeApp([
@@ -264,11 +261,20 @@ describe("ensureProjectContextMaterialized", () => {
       { path: "Proj/note.md", ext: "md" },
     ]);
 
-    await ensureProjectContextMaterialized(app, "p1", CWD);
+    const progress: ContextMaterializeProgress[] = [];
+    await ensureProjectContextMaterialized(app, "p1", CWD, (p) => progress.push(p));
 
-    const client = getClient.mock.results[0].value as { docs4llm: jest.Mock };
-    expect(client.docs4llm).toHaveBeenCalledTimes(1); // pdf only, never the .md
-    expect([...mockFs.files.keys()].some((k) => k.includes("/file-"))).toBe(true);
+    // The PDF has no local converter on this path: it fails per-source, while
+    // markdown is never queued for conversion.
+    const failuresPhase = progress.find((p) => p.phase === "failures");
+    expect(
+      failuresPhase?.phase === "failures" &&
+        failuresPhase.failures
+          .map((f) => f.error)
+          .every((e) => e.includes("No local document processor"))
+    ).toBe(true);
+    expect([...mockFs.files.keys()].some((k) => k.includes("/file-"))).toBe(false);
+    expect([...mockFs.files.keys()].some((k) => k.includes("failed-file-"))).toBe(true);
   });
 
   it("reports resolve + per-loop progress through onProgress", async () => {
@@ -285,15 +291,8 @@ describe("ensureProjectContextMaterialized", () => {
     expect(progress).toContainEqual({ phase: "parse", done: 1, total: 1 });
   });
 
-  it("never rejects when a brevilabs fetch fails", async () => {
+  it("never rejects when a remote source cannot be converted", async () => {
     getRecord.mockReturnValue(record({ webUrls: "https://broken.com" }));
-    getClient.mockReturnValue({
-      url4llm: jest.fn(async () => {
-        throw new Error("network down");
-      }),
-      youtube4llm: jest.fn(),
-      docs4llm: jest.fn(),
-    });
 
     const result = await ensureProjectContextMaterialized(fakeApp(), "p1", CWD);
     // Degrades gracefully: block still built, no snapshot written, never throws.
@@ -327,107 +326,127 @@ describe("ensureProjectContextMaterialized — single-flight", () => {
   it("dedupes concurrent calls for the same project to one run", async () => {
     getRecord.mockReturnValue(record({ webUrls: "https://a.com" }));
     const app = fakeApp();
+    // Hold the first run mid-upsert (inside the per-artifact lock) so the second
+    // call arrives while it is genuinely in flight.
+    let release!: () => void;
+    fsGate = {
+      match: (p) => p.includes(cacheFileName("web", "https://a.com")),
+      promise: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    };
 
-    const [r1, r2] = await Promise.all([
-      ensureProjectContextMaterialized(app, "p1", CWD),
-      ensureProjectContextMaterialized(app, "p1", CWD),
-    ]);
+    const a = ensureProjectContextMaterialized(app, "p1", CWD);
+    await flushMicrotasks(); // A reaches its gated meta read, still in flight
+    const b = ensureProjectContextMaterialized(app, "p1", CWD); // joins A
+    release();
 
-    const client = getClient.mock.results[0].value as { url4llm: jest.Mock };
-    expect(client.url4llm).toHaveBeenCalledTimes(1); // fetched once, not twice
+    const [r1, r2] = await Promise.all([a, b]);
     expect(r1).toBe(r2); // both awaited the same in-flight promise
   });
 
   it("does not serialize different projects with DIFFERENT sources", async () => {
     // Distinct URLs per project: the per-project single-flight doesn't block them
     // and they don't collide on the global per-artifact lock (different keys).
+    // p1's upsert is held in flight; p2 must still settle BEFORE it is released.
     getRecord.mockImplementation((id: string) =>
       record({ webUrls: id === "p1" ? "https://p1.com" : "https://p2.com" }, id)
     );
+    let release!: () => void;
+    fsGate = {
+      match: (p) => p.includes(cacheFileName("web", "https://p1.com")),
+      promise: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    };
 
-    await Promise.all([
-      ensureProjectContextMaterialized(fakeApp(), "p1", "/vault/P1"),
-      ensureProjectContextMaterialized(fakeApp(), "p2", "/vault/P2"),
-    ]);
+    const p1 = ensureProjectContextMaterialized(fakeApp(), "p1", "/vault/P1");
+    const p2 = ensureProjectContextMaterialized(fakeApp(), "p2", "/vault/P2");
 
-    const client = getClient.mock.results[0].value as { url4llm: jest.Mock };
-    expect(client.url4llm).toHaveBeenCalledTimes(2); // one per project, ran in parallel
+    // p2 settles while p1 is still gated — they never serialize.
+    const r2 = await p2;
+    expect(r2.projectContextBlock).toContain("https://p2.com");
+
+    release();
+    const r1 = await p1;
+    expect(r1.projectContextBlock).toContain("https://p1.com");
   });
 
-  it("dedupes two projects converting the SAME url to a single fetch (global per-artifact lock)", async () => {
+  it("gives two projects converting the SAME url one shared per-artifact lock (no overwrite race)", async () => {
     // Same URL across two distinct projects → same snapshot file name → same
-    // global mutex. The first fetches and writes; the second re-reads the meta
-    // inside the lock and cheap-skips. (The OLD behavior fetched twice.)
+    // global mutex. The first run holds the shared meta read in flight; the
+    // second waits on the lock instead of racing the same cache files. (The OLD
+    // behavior fetched twice in parallel.)
     getRecord.mockImplementation((id: string) => record({ webUrls: "https://shared.com" }, id));
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let calls = 0;
-    const url4llm = jest.fn(async () => {
-      calls += 1;
-      await gate; // hold the lock so the second project is forced to wait
-      return { response: `content #${calls}` };
-    });
-    getClient.mockReturnValue({ url4llm, youtube4llm: jest.fn(), docs4llm: jest.fn() });
+    fsGate = {
+      match: (p) => p.startsWith("remotes/web-"),
+      promise: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    };
 
     const a = ensureProjectContextMaterialized(fakeApp(), "pA", "/vault/PA");
-    await flushMicrotasks(); // A acquires the lock and reaches the gated fetch
+    await flushMicrotasks(); // A acquires the lock and reaches the gated meta read
     const b = ensureProjectContextMaterialized(fakeApp(), "pB", "/vault/PB");
-    await flushMicrotasks(); // B is waiting on the same per-artifact lock
     release();
     await Promise.all([a, b]);
 
-    expect(url4llm).toHaveBeenCalledTimes(1); // merged to a single fetch
-    const snapshots = [...mockFs.files.keys()].filter((k) => k.startsWith("remotes/web-"));
-    expect(snapshots).toHaveLength(1);
-    expect(mockFs.files.get(snapshots[0])).toContain("content #1"); // not overwritten by B
+    // Both runs mark the source failed per-project; no shared snapshot exists.
+    expect([...mockFs.files.keys()].some((k) => k.startsWith("remotes/web-"))).toBe(false);
+    const markers = [...mockFs.files.keys()].filter((k) => k.includes("failed-web-"));
+    expect(markers).toHaveLength(2); // one per project
   });
 
   it("clears the in-flight entry so a later call re-evaluates fresh state", async () => {
     const app = fakeApp();
     getRecord.mockReturnValue(record({ webUrls: "https://a.com" }));
-    await ensureProjectContextMaterialized(app, "p1", CWD);
+    const r1 = await ensureProjectContextMaterialized(app, "p1", CWD);
 
     // After the first run settled, the source changed — a fresh call must run
-    // again (not return the prior settled promise) and fetch the new URL.
+    // again (not return the prior settled promise) and process the NEW source.
     getRecord.mockReturnValue(record({ webUrls: "https://b.com" }));
-    await ensureProjectContextMaterialized(app, "p1", CWD);
+    const r2 = await ensureProjectContextMaterialized(app, "p1", CWD);
 
-    const client = getClient.mock.results[0].value as { url4llm: jest.Mock };
-    expect(client.url4llm).toHaveBeenCalledWith("https://b.com");
-    expect(client.url4llm).toHaveBeenCalledTimes(2);
+    expect(r2).not.toBe(r1);
+    expect(r2.contextSignature).not.toBe(r1.contextSignature);
+    expect(
+      [...mockFs.files.keys()].some(
+        (k) => k.includes("failed-web-") && mockFs.files.get(k)!.includes("https://b.com")
+      )
+    ).toBe(true);
   });
 
   it("supersedes an in-flight run whose source set was edited (a later caller must not join the stale run)", async () => {
     const app = fakeApp();
-    // Run A materializes source A; gate its fetch so it stays in flight.
+    // Run A materializes source A; gate its upsert so it stays in flight.
     getRecord.mockReturnValue(record({ webUrls: "https://a.com" }));
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const url4llm = jest.fn(async (url: string) => {
-      if (url === "https://a.com") await gate; // hold run A in flight
-      return { response: url === "https://a.com" ? "A text" : "B text" };
-    });
-    getClient.mockReturnValue({ url4llm, youtube4llm: jest.fn(), docs4llm: jest.fn() });
+    fsGate = {
+      match: (p) => p.startsWith("remotes/web-"),
+      promise: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    };
 
     const a = ensureProjectContextMaterialized(app, "p1", CWD); // non-force, signature S1
-    await flushMicrotasks(); // A reaches the gated fetch, still in flight
+    await flushMicrotasks(); // A reaches the gated read, still in flight
 
     // The project's context is edited mid-flight → new source set → new signature.
     getRecord.mockReturnValue(record({ webUrls: "https://b.com" }));
-    const b = ensureProjectContextMaterialized(app, "p1", CWD); // non-force, signature S2
+    const progressB: ContextMaterializeProgress[] = [];
+    const b = ensureProjectContextMaterialized(app, "p1", CWD, (p) => progressB.push(p)); // signature S2
 
     release(); // let A settle; B's deferred run then materializes the NEW source
     const [aRes, bRes] = await Promise.all([a, b]);
 
     // B did NOT join the stale run — it superseded and captured the edited sources.
-    // (Pre-fix, the unconditional non-force join returned A's pre-edit result and
-    // never fetched b.com.)
     expect(bRes).not.toBe(aRes);
-    expect(url4llm).toHaveBeenCalledWith("https://b.com");
+    const failuresB = progressB.find((p) => p.phase === "failures");
+    expect(
+      failuresB?.phase === "failures" &&
+        failuresB.failures.some((f) => f.source === "https://b.com")
+    ).toBe(true);
   });
 
   it("supersedes an in-flight run when a caller passes a NEWER revisionKey (same config signature)", async () => {
@@ -436,14 +455,12 @@ describe("ensureProjectContextMaterialized — single-flight", () => {
     // revision key differs — the case a pure file edit produces.
     getRecord.mockReturnValue(record({ webUrls: "https://a.com" }));
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const url4llm = jest.fn(async (url: string) => {
-      await gate;
-      return { response: `${url} text` };
-    });
-    getClient.mockReturnValue({ url4llm, youtube4llm: jest.fn(), docs4llm: jest.fn() });
+    fsGate = {
+      match: (p) => p.startsWith("remotes/web-"),
+      promise: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    };
 
     // A runs at revision epoch 0; hold it in flight.
     const a = ensureProjectContextMaterialized(app, "p1", CWD, undefined, undefined, "sig#0");
@@ -455,45 +472,45 @@ describe("ensureProjectContextMaterialized — single-flight", () => {
     const [aRes, bRes] = await Promise.all([a, b]);
 
     // Distinct result objects prove B ran its OWN materialization (superseded)
-    // rather than joining A's in-flight promise, which would return the same
-    // object. (The URL's snapshot is fingerprint cheap-skipped, so the count of
-    // fetches isn't the signal here — the separate run is.)
+    // rather than joining A's in-flight promise.
     expect(bRes).not.toBe(aRes);
   });
 
   it("still dedupes concurrent callers that share the same revisionKey", async () => {
     getRecord.mockReturnValue(record({ webUrls: "https://a.com" }));
     const app = fakeApp();
+    let release!: () => void;
+    fsGate = {
+      match: (p) => p.startsWith("remotes/web-"),
+      promise: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    };
 
-    const [r1, r2] = await Promise.all([
-      ensureProjectContextMaterialized(app, "p1", CWD, undefined, undefined, "sig#7"),
-      ensureProjectContextMaterialized(app, "p1", CWD, undefined, undefined, "sig#7"),
-    ]);
+    const a = ensureProjectContextMaterialized(app, "p1", CWD, undefined, undefined, "sig#7");
+    await flushMicrotasks(); // A is in flight
+    const b = ensureProjectContextMaterialized(app, "p1", CWD, undefined, undefined, "sig#7"); // joins A
+    release();
 
-    const client = getClient.mock.results[0].value as { url4llm: jest.Mock };
-    expect(client.url4llm).toHaveBeenCalledTimes(1); // one run, joined
-    expect(r1).toBe(r2);
+    const [r1, r2] = await Promise.all([a, b]);
+    expect(r1).toBe(r2); // one run, joined
   });
 });
 
 describe("Option D — failure markers, forced retry, single-source reconcile", () => {
-  it("cheap-skips a known-bad source on the next automatic run (no re-fetch)", async () => {
+  it("cheap-skips a known-bad source on the next automatic run (no re-attempt)", async () => {
     const app = fakeApp();
     getRecord.mockReturnValue(record({ webUrls: "https://a.com" }));
-    const url4llm = jest.fn(async () => {
-      throw new Error("network down");
-    });
-    getClient.mockReturnValue({ url4llm, youtube4llm: jest.fn(), docs4llm: jest.fn() });
 
     await ensureProjectContextMaterialized(app, "p1", CWD);
     expect([...mockFs.files.keys()].some((k) => k.includes("failed-web-"))).toBe(true);
 
-    // Second automatic pass: the failure marker is honored — the URL is not
-    // re-fetched — yet the failure is still surfaced through onProgress.
+    // Second automatic pass: the failure marker is honored — no attempt begins —
+    // yet the failure is still surfaced through onProgress.
     const progress: ContextMaterializeProgress[] = [];
     await ensureProjectContextMaterialized(app, "p1", CWD, (p) => progress.push(p));
 
-    expect(url4llm).toHaveBeenCalledTimes(1); // not re-fetched
+    expect(progress.some((p) => p.phase === "itemStart")).toBe(false); // never re-attempted
     const failures = progress.find((p) => p.phase === "failures");
     expect(failures?.phase === "failures" && failures.failures).toHaveLength(1);
   });
@@ -501,26 +518,26 @@ describe("Option D — failure markers, forced retry, single-source reconcile", 
   it("materializeProjectContextSource forces a retry past the failure marker", async () => {
     const app = fakeApp();
     getRecord.mockReturnValue(record({ webUrls: "https://a.com" }));
-    const url4llm = jest.fn(async (): Promise<{ response: string }> => {
-      throw new Error("network down");
-    });
-    getClient.mockReturnValue({ url4llm, youtube4llm: jest.fn(), docs4llm: jest.fn() });
     await ensureProjectContextMaterialized(app, "p1", CWD);
-    expect(url4llm).toHaveBeenCalledTimes(1);
+    expect([...mockFs.files.keys()].some((k) => k.includes("failed-web-"))).toBe(true);
 
-    // The single-source Retry forces a fresh fetch even though the marker is on
-    // disk (the automatic path above would have cheap-skipped it).
-    url4llm.mockResolvedValueOnce({ response: "recovered" });
+    // The single-source Retry forces a fresh attempt even though the marker is
+    // on disk (the automatic path above cheap-skipped it). The converter still
+    // has no local provider, so the retry re-records the failure — observable as
+    // a SECOND marker write that a cheap-skip would never make.
+    const markerWrites = jest.spyOn(mockFs, "writeText");
     const failures = await materializeProjectContextSource(app, "p1", {
       kind: "web",
       source: "https://a.com",
     });
 
-    expect(url4llm).toHaveBeenCalledTimes(2);
-    expect(failures).toHaveLength(0);
-    const snapshot = [...mockFs.files.keys()].find((k) => k.includes("/web-"));
-    expect(mockFs.files.get(snapshot!)).toContain("recovered");
-    expect([...mockFs.files.keys()].some((k) => k.includes("failed-web-"))).toBe(false);
+    expect(markerWrites.mock.calls.filter(([p]) => String(p).includes("failed-web-"))).toHaveLength(
+      1
+    );
+    expect(failures).toHaveLength(1);
+    expect([...mockFs.files.keys()].some((k) => k.includes("failed-web-"))).toBe(true);
+    // No snapshot was ever produced for the source.
+    expect([...mockFs.files.keys()].some((k) => k.includes("/web-"))).toBe(false);
   });
 
   it("a forced retry supersedes an in-flight non-force warm; later joiners get the forced result", async () => {
@@ -528,91 +545,93 @@ describe("Option D — failure markers, forced retry, single-source reconcile", 
 
     // Phase 1: source A fails on the automatic path → marker, no snapshot.
     getRecord.mockReturnValue(record({ webUrls: "https://a.com" }));
-    getClient.mockReturnValue({
-      url4llm: jest.fn(async () => {
-        throw new Error("down");
-      }),
-      youtube4llm: jest.fn(),
-      docs4llm: jest.fn(),
-    });
     await ensureProjectContextMaterialized(app, "p1", CWD);
     expect([...mockFs.files.keys()].some((k) => k.includes("failed-web-"))).toBe(true);
 
     // Phase 2: the source set now also has B (e.g. a source edit kicked off a
-    // warm). The warm is non-force, so it cheap-skips A's marker and only fetches
-    // B; a forced "Retry" arrives while it is in flight.
+    // warm). The warm is non-force, so it cheap-skips A's marker and only
+    // attempts B — hold B's upsert in flight so the forced retry arrives while
+    // the warm is still running.
     getRecord.mockReturnValue(record({ webUrls: "https://a.com\nhttps://b.com" }));
-    const url4llm = jest.fn(async (url: string) => ({ response: url === "https://a.com" ? "A recovered" : "B text" })); // prettier-ignore
-    getClient.mockReturnValue({ url4llm, youtube4llm: jest.fn(), docs4llm: jest.fn() });
+    let release!: () => void;
+    fsGate = {
+      match: (p) => p.includes(cacheFileName("web", "https://b.com")),
+      promise: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    };
 
-    const warm = ensureProjectContextMaterialized(app, "p1", CWD); // non-force
-    const forced = ensureProjectContextMaterialized(app, "p1", CWD, undefined, true);
+    const warmProgress: ContextMaterializeProgress[] = [];
+    const warm = ensureProjectContextMaterialized(app, "p1", CWD, (p) => warmProgress.push(p)); // non-force
+    await flushMicrotasks(); // the warm reaches its gated B upsert
+    const forcedProgress: ContextMaterializeProgress[] = [];
+    const forced = ensureProjectContextMaterialized(
+      app,
+      "p1",
+      CWD,
+      (p) => forcedProgress.push(p),
+      true
+    );
     const joiner = ensureProjectContextMaterialized(app, "p1", CWD); // non-force, lands after the force
+    release();
 
+    const [warmRes, forcedRes, joinerRes] = await Promise.all([warm, forced, joiner]);
     // Resolved-value identity (the fn is async, so promise refs always differ):
     // a later non-force caller joins the FORCED run, not the stale warm — so a
     // session-create / landing-refresh after Retry captures the forced result.
-    const [warmRes, forcedRes, joinerRes] = await Promise.all([warm, forced, joiner]);
     expect(joinerRes).toBe(forcedRes);
     expect(joinerRes).not.toBe(warmRes);
 
-    // The forced pass re-fetched A past its marker and cleared it (a non-force
-    // warm would have cheap-skipped it); B (written by the warm) cheap-skipped on
-    // its identity fingerprint.
-    expect(url4llm).toHaveBeenCalledWith("https://a.com");
-    const snapshotA = [...mockFs.files.keys()].find(
-      (k) => k.includes("/web-") && mockFs.files.get(k)!.includes("A recovered")
-    );
-    expect(snapshotA).toBeDefined();
-    expect([...mockFs.files.keys()].some((k) => k.includes("failed-web-"))).toBe(false);
+    // The forced pass re-attempted A past its marker (a non-force warm would
+    // have cheap-skipped it), while the warm only ever started B.
+    const started = (progress: ContextMaterializeProgress[]) =>
+      progress
+        .filter((p) => p.phase === "itemStart")
+        .map((p) => (p.phase === "itemStart" && p.item.source) || "");
+    expect(started(forcedProgress)).toContain("https://a.com");
+    expect(started(warmProgress)).not.toContain("https://a.com");
   });
 
   it("a concurrent full run does not duplicate or clobber a single-source retry (per-artifact lock)", async () => {
-    // Replaces the old reconcile-coordination test. Shared snapshots are never
-    // reconciled, and the retry + full run serialize on the per-artifact lock for
-    // the same URL — so the retry's snapshot survives and is not re-fetched.
+    // The retry + full run serialize on the per-artifact lock for the same URL —
+    // so the retry's outcome survives and the full run cheap-skips instead of
+    // double-attempting the source.
     const app = fakeApp();
     getRecord.mockReturnValue(record({ webUrls: "https://a.com" }));
 
     // 1. First automatic run fails → marker on disk, no snapshot.
-    getClient.mockReturnValue({
-      url4llm: jest.fn(async () => {
-        throw new Error("down");
-      }),
-      youtube4llm: jest.fn(),
-      docs4llm: jest.fn(),
-    });
     await ensureProjectContextMaterialized(app, "p1", CWD);
     expect([...mockFs.files.keys()].some((k) => k.includes("failed-web-"))).toBe(true);
 
-    // 2. Gate the single-source retry's fetch so it holds the per-artifact lock.
-    let releaseFetch!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      releaseFetch = resolve;
-    });
-    const url4llm = jest.fn(async () => {
-      await gate;
-      return { response: "recovered" };
-    });
-    getClient.mockReturnValue({ url4llm, youtube4llm: jest.fn(), docs4llm: jest.fn() });
-
+    // 2. Gate the retry's marker WRITE so it holds the per-artifact lock
+    //    mid-write-window (the equivalent of the old gated fetch).
+    let releaseWrite!: () => void;
+    fsGate = {
+      match: (p) => p.includes("failed-web-"),
+      promise: new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      }),
+    };
     const retry = materializeProjectContextSource(app, "p1", { kind: "web", source: "https://a.com" }); // prettier-ignore
-    await flushMicrotasks(); // the retry acquires the lock and reaches its gated fetch
+    await flushMicrotasks(); // the retry acquires the lock and reaches its gated write
 
     // 3. A full run starts during the retry's write window. Its upsert for the
-    //    same URL waits on the same per-artifact lock rather than re-fetching.
-    const full = ensureProjectContextMaterialized(app, "p1", CWD);
+    //    same URL waits on the same per-artifact lock rather than re-attempting.
+    const fullProgress: ContextMaterializeProgress[] = [];
+    const full = ensureProjectContextMaterialized(app, "p1", CWD, (p) => fullProgress.push(p));
     await flushMicrotasks();
 
     // 4. Release the retry; both settle.
-    releaseFetch();
-    await Promise.all([retry, full]);
+    releaseWrite();
+    const [retryFailures, fullRes] = await Promise.all([retry, full]);
 
-    // 5. One fetch total (the retry's); its snapshot survived, marker cleared.
-    const snapshot = [...mockFs.files.keys()].find((k) => k.startsWith("remotes/web-"));
-    expect(snapshot).toBeDefined();
-    expect(mockFs.files.get(snapshot!)).toContain("recovered");
-    expect([...mockFs.files.keys()].some((k) => k.includes("failed-web-"))).toBe(false);
-    expect(url4llm).toHaveBeenCalledTimes(1);
+    // 5. No snapshot exists (no local converter), but the failure marker
+    //    survived the racing full run, which cheap-skipped it.
+    expect(retryFailures).toHaveLength(1);
+    expect([...mockFs.files.keys()].some((k) => k.startsWith("remotes/web-"))).toBe(false);
+    expect([...mockFs.files.keys()].some((k) => k.includes("failed-web-"))).toBe(true);
+    const fullFailures = fullProgress.find((p) => p.phase === "failures");
+    expect(fullFailures?.phase === "failures" && fullFailures.failures).toHaveLength(1);
+    expect(fullRes.contextSignature).toBeDefined();
   });
 });

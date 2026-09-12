@@ -5,11 +5,8 @@ import {
 } from "@/components/chat-components/ChatHistoryPopover";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { PLUS_UTM_MEDIUMS } from "@/constants";
-import { cn } from "@/lib/utils";
-import { navigateToPlusPage, useCanUseMultiAgent } from "@/plusUtils";
 import { useSettingsValue } from "@/settings/model";
-import { Download, History, MessageCirclePlus, Sparkles } from "lucide-react";
+import { Download, History, MessageCirclePlus } from "lucide-react";
 import React from "react";
 
 const resolveHistoryIcon = (item: ChatHistoryItem) =>
@@ -45,7 +42,6 @@ interface AgentChatControlsProps {
    * second agent to someone who has no working first one. Only the conversation
    * mount sets it, and it still defers to the entitlement check.
    */
-  showMultiAgentUpsell?: boolean;
 }
 
 /**
@@ -68,38 +64,15 @@ export const AgentChatControls: React.FC<AgentChatControlsProps> = ({
   onDeleteChat,
   onOpenSourceFile,
   usageMeter,
-  showMultiAgentUpsell = false,
 }) => {
   const settings = useSettingsValue();
-  const canUseMultiAgent = useCanUseMultiAgent();
   const historyAvailable = Boolean(
     chatHistoryItems && onLoadChat && onUpdateChatTitle && onDeleteChat
   );
 
   return (
     <div className="tw-flex tw-w-full tw-items-center tw-justify-between tw-p-1">
-      <div className="tw-ml-1 tw-flex tw-min-w-0 tw-flex-1 tw-items-center tw-gap-1">
-        {showMultiAgentUpsell && !canUseMultiAgent && (
-          <Button
-            variant="ghost2"
-            size="fit"
-            className={cn(
-              "tw-flex tw-min-w-0 tw-items-center tw-gap-1 tw-text-ui-smaller tw-text-muted",
-              "hover:tw-text-normal"
-            )}
-            onClick={() => navigateToPlusPage(PLUS_UTM_MEDIUMS.MULTI_AGENT)}
-          >
-            <Sparkles className="tw-size-3 tw-shrink-0" />
-            {/* The label must truncate on its own element: `tw-truncate` on the
-                flex-container button would make the text an anonymous flex item,
-                which `text-overflow` never reaches, so narrow panes would hard-clip
-                the copy instead of ellipsizing it. */}
-            <span className="tw-truncate">
-              Mention multiple agents with @ (needs Plus tier or above)
-            </span>
-          </Button>
-        )}
-      </div>
+      <div className="tw-ml-1 tw-flex tw-min-w-0 tw-flex-1 tw-items-center tw-gap-1"></div>
       <div className="tw-flex tw-items-center tw-gap-1">
         {usageMeter}
         {onNewChat && (

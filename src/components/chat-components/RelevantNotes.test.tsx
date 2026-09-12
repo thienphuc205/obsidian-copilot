@@ -32,7 +32,6 @@ const mockUpdateSetting = jest.fn();
 let mockSettings = {
   enableMiyo: true,
   miyoServerUrl: "",
-  plusLicenseKey: "old-license",
   relevantNotesLiveUpdate: true,
 };
 let mockMiyoBackend = "unknown";
@@ -92,7 +91,6 @@ describe("RelevantNotes", () => {
     mockSettings = {
       enableMiyo: true,
       miyoServerUrl: "",
-      plusLicenseKey: "old-license",
       relevantNotesLiveUpdate: true,
     };
     mockMiyoBackend = "unknown";
@@ -429,43 +427,6 @@ describe("RelevantNotes", () => {
 
       expect(screen.queryByText("Stale")).toBeNull();
       expect(screen.getByText("Current")).toBeTruthy();
-    });
-
-    it("supersedes an in-flight request when the Miyo credential changes (https://github.com/Brevilabs/obsidian-copilot-private/issues/280)", async () => {
-      let resolveFirst:
-        | ((notes: Awaited<ReturnType<typeof findRelevantNotes>>) => void)
-        | undefined;
-      const firstResult = new Promise<Awaited<ReturnType<typeof findRelevantNotes>>>((resolve) => {
-        resolveFirst = resolve;
-      });
-      mockFindRelevantNotes.mockReturnValueOnce(firstResult).mockResolvedValueOnce({
-        notes: [
-          {
-            note: { path: "Current.md", title: "Current" },
-            metadata: {
-              score: 0.9,
-              hasOutgoingLinks: false,
-              hasBacklinks: false,
-            },
-          },
-        ],
-        status: "matches",
-      });
-
-      const { rerender } = render(<RelevantNotes onAddToChat={jest.fn()} />);
-      await waitFor(() => expect(mockFindRelevantNotes).toHaveBeenCalledTimes(1));
-
-      mockSettings = { ...mockSettings, plusLicenseKey: "new-license" };
-      rerender(<RelevantNotes onAddToChat={jest.fn()} />);
-      expect(await screen.findByText("Current")).toBeTruthy();
-
-      await act(async () => {
-        resolveFirst?.({ notes: [], status: "no-matches" });
-        await firstResult;
-      });
-
-      expect(screen.getByText("Current")).toBeTruthy();
-      expect(screen.queryByText("No semantic matches yet")).toBeNull();
     });
 
     it("keeps a superseded Miyo failure from clearing newer results (https://github.com/Brevilabs/obsidian-copilot-private/issues/280)", async () => {

@@ -5,11 +5,9 @@ import {
 } from "./builtinSkillEnv";
 import { getSettings } from "@/settings/model";
 import { getMiyoCustomUrl } from "@/miyo/miyoUtils";
-import { BREVILABS_API_BASE_URL } from "@/constants";
 import {
   MIYO_SEARCH_FOLDER_ENV,
   MIYO_SEARCH_SCOPE_ENV,
-  PLUS_ENV,
   SELF_HOST_WEB_SEARCH_ENV,
   SELF_HOST_WEB_SEARCH_TOKEN_ENV,
   SELF_HOST_WEB_SEARCH_URL_ENV,
@@ -43,35 +41,13 @@ describe("builtinSkillEnv", () => {
   });
 
   describe("buildBuiltinSkillEnv()", () => {
-    it("returns the service credentials and relay config for an active Plus user", async () => {
-      mockGetSettings.mockReturnValue({
-        isPaidUser: true,
-        plusLicenseKey: "hydrated-key",
-        userId: "user-123",
-      });
-      const env = await buildBuiltinSkillEnv("4.0.0");
-
-      expect(env).toEqual({
-        [PLUS_ENV.licenseKey]: "hydrated-key",
-        [PLUS_ENV.baseUrl]: BREVILABS_API_BASE_URL,
-        [PLUS_ENV.userId]: "user-123",
-        [PLUS_ENV.clientVersion]: "4.0.0",
-      });
-      expect(env).not.toHaveProperty("OPENARTIFACTS_TOKEN");
+    it("returns empty for a user with no managed skill configuration", async () => {
+      mockGetSettings.mockReturnValue({});
+      expect(await buildBuiltinSkillEnv("4.0.0")).toEqual({});
     });
 
-    it("returns empty when the user is not a Plus subscriber", async () => {
-      mockGetSettings.mockReturnValue({ isPaidUser: false, plusLicenseKey: "hydrated-key" });
-      expect(await buildBuiltinSkillEnv()).toEqual({});
-    });
-
-    it("returns empty when there is no license key on file", async () => {
-      mockGetSettings.mockReturnValue({ isPaidUser: true, plusLicenseKey: "" });
-      expect(await buildBuiltinSkillEnv()).toEqual({});
-    });
-
-    it("injects MIYO_URL when a custom Miyo server URL is set, independent of Plus", async () => {
-      mockGetSettings.mockReturnValue({ isPaidUser: false });
+    it("injects MIYO_URL when a custom Miyo server URL is set", async () => {
+      mockGetSettings.mockReturnValue({});
       mockGetMiyoCustomUrl.mockReturnValue("http://192.168.1.10:8742");
       expect(await buildBuiltinSkillEnv()).toEqual({ MIYO_URL: "http://192.168.1.10:8742" });
     });
@@ -81,7 +57,7 @@ describe("builtinSkillEnv", () => {
     });
 
     it("https://github.com/Brevilabs/obsidian-copilot-private/issues/121 defaults scope closed when the active vault identity is unavailable", async () => {
-      mockGetSettings.mockReturnValue({ isPaidUser: false });
+      mockGetSettings.mockReturnValue({});
 
       expect(await buildBuiltinSkillEnv("", "/vault")).toEqual({
         [OPENARTIFACTS_WORKSPACE_ROOT_ENV]: "/vault",
@@ -90,7 +66,7 @@ describe("builtinSkillEnv", () => {
     });
 
     it("https://github.com/Brevilabs/obsidian-copilot-private/issues/121 injects the active vault identity for Current vault search", async () => {
-      mockGetSettings.mockReturnValue({ isPaidUser: false, miyoSearchAll: false });
+      mockGetSettings.mockReturnValue({ miyoSearchAll: false });
 
       expect(await buildBuiltinSkillEnv("", "/vault/root", "root")).toEqual({
         [OPENARTIFACTS_WORKSPACE_ROOT_ENV]: "/vault/root",
@@ -100,7 +76,7 @@ describe("builtinSkillEnv", () => {
     });
 
     it("https://github.com/Brevilabs/obsidian-copilot-private/issues/121 marks Unrestricted search without replacing the active vault identity", async () => {
-      mockGetSettings.mockReturnValue({ isPaidUser: false, miyoSearchAll: true });
+      mockGetSettings.mockReturnValue({ miyoSearchAll: true });
 
       expect(await buildBuiltinSkillEnv("", "/vault/root", "root")).toEqual({
         [OPENARTIFACTS_WORKSPACE_ROOT_ENV]: "/vault/root",
@@ -109,8 +85,8 @@ describe("builtinSkillEnv", () => {
       });
     });
 
-    it("injects the host Obsidian CLI independently of Plus and Miyo", async () => {
-      mockGetSettings.mockReturnValue({ isPaidUser: false });
+    it("injects the host Obsidian CLI independently of Miyo", async () => {
+      mockGetSettings.mockReturnValue({});
       mockResolveObsidianCliPath.mockReturnValue("C:/Users/Me/App Data/Obsidian/Obsidian.com");
 
       expect(await buildBuiltinSkillEnv()).toEqual({
@@ -120,7 +96,6 @@ describe("builtinSkillEnv", () => {
 
     it("https://github.com/Brevilabs/obsidian-copilot-private/issues/165 injects protected Self-Host routing without provider credentials", async () => {
       mockGetSettings.mockReturnValue({
-        isPaidUser: false,
         enableSelfHostMode: true,
         exaApiKey: "host-only-key",
       });
@@ -141,25 +116,20 @@ describe("builtinSkillEnv", () => {
     });
 
     it("https://github.com/Brevilabs/obsidian-copilot-private/issues/165 does not mark Self-Host routing active before its replacement channel exists", async () => {
-      mockGetSettings.mockReturnValue({ isPaidUser: false, enableSelfHostMode: true });
+      mockGetSettings.mockReturnValue({ enableSelfHostMode: true });
 
       expect(await buildBuiltinSkillEnv()).toEqual({});
     });
 
-    it("merges MIYO_URL with the Plus relay env for a Plus user with a custom Miyo URL", async () => {
-      mockGetSettings.mockReturnValue({
-        isPaidUser: true,
-        plusLicenseKey: "hydrated-key",
-        userId: "user-123",
-      });
+    it("merges MIYO_URL with the vault scope for a remote-Miyo user", async () => {
+      mockGetSettings.mockReturnValue({});
       mockGetMiyoCustomUrl.mockReturnValue("http://miyo.example:8742");
 
-      expect(await buildBuiltinSkillEnv("4.0.0")).toEqual({
+      expect(await buildBuiltinSkillEnv("4.0.0", "/vault/root", "root")).toEqual({
         MIYO_URL: "http://miyo.example:8742",
-        [PLUS_ENV.licenseKey]: "hydrated-key",
-        [PLUS_ENV.baseUrl]: BREVILABS_API_BASE_URL,
-        [PLUS_ENV.userId]: "user-123",
-        [PLUS_ENV.clientVersion]: "4.0.0",
+        [OPENARTIFACTS_WORKSPACE_ROOT_ENV]: "/vault/root",
+        [MIYO_SEARCH_SCOPE_ENV]: "current",
+        [MIYO_SEARCH_FOLDER_ENV]: "root",
       });
     });
   });
@@ -196,11 +166,7 @@ describe("builtinSkillEnv", () => {
   });
 
   describe("getBuiltinSkillEnvRestartPolicy()", () => {
-    it.each([
-      ["isPaidUser", false, true],
-      ["plusLicenseKey", "old", "new"],
-      ["miyoServerUrl", "http://old", "http://new"],
-    ])(
+    it.each([["miyoServerUrl", "http://old", "http://new"]])(
       "https://github.com/Brevilabs/obsidian-copilot-private/issues/121 defers the spawn-time refresh when %s changes",
       (key, before, after) => {
         const prev = { [key]: before } as unknown as ReturnType<typeof getSettings>;
@@ -238,12 +204,19 @@ describe("builtinSkillEnv", () => {
       }
     );
 
-    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/165 keeps Claude's shared environment refresh deferred when OpenCode-only routing changes too", () => {
-      const prev = { isPaidUser: false, enableSelfHostMode: false } as ReturnType<
+    it("keeps Claude's shared environment refresh deferred when OpenCode-only routing changes too", () => {
+      // The Miyo server URL feeds the managed env on every backend. When it
+      // changes in the same settings write that enables Self-Host routing,
+      // OpenCode restarts immediately for the routing flip while Claude defers
+      // for the URL — the flip must not upgrade Claude's policy to immediate.
+      const prev = { miyoServerUrl: "http://old", enableSelfHostMode: false } as ReturnType<
         typeof getSettings
       >;
-      const next = { isPaidUser: true, enableSelfHostMode: true } as ReturnType<typeof getSettings>;
+      const next = { miyoServerUrl: "http://new", enableSelfHostMode: true } as ReturnType<
+        typeof getSettings
+      >;
 
+      expect(getBuiltinSkillEnvRestartPolicy(prev, next, "opencode")).toBe("immediate");
       expect(getBuiltinSkillEnvRestartPolicy(prev, next, "claude")).toBe("deferred");
     });
 

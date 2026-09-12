@@ -433,6 +433,105 @@ describe("settingsPersistence", () => {
       expect(saveData.mock.calls[0][0].openAIApiKey).toBe("");
     });
 
+    it.each([
+      ["firecrawlAgentWebApiKey", "copilot-vabcd1234-firecrawl-agent-web-api-key"],
+      ["tavilyAgentWebApiKey", "copilot-vabcd1234-tavily-agent-web-api-key"],
+      ["exaAgentWebApiKey", "copilot-vabcd1234-exa-agent-web-api-key"],
+      ["customAgentWebApiKey", "copilot-vabcd1234-custom-agent-web-api-key"],
+    ] as const)(
+      "round-trips a cleared %s through sparse stripped settings",
+      async (keyField, providerId) => {
+        const storedSecrets = new Map<string, string>();
+        const openAiId = "copilot-vabcd1234-open-a-i-api-key";
+        const secretFields = [
+          [keyField, providerId],
+          ["openAIApiKey", openAiId],
+        ] as const;
+        const persistSecrets = jest.fn((settings: CopilotSettings, previous?: CopilotSettings) => {
+          const current = settings as unknown as Record<string, unknown>;
+          const prior = previous as unknown as Record<string, unknown> | undefined;
+          const secretEntries: Array<[string, string]> = [];
+          const keychainIdsToDelete: string[] = [];
+
+          for (const [key, id] of secretFields) {
+            const value = current[key];
+            const previousValue = prior?.[key];
+            if (typeof value === "string" && value.length > 0) {
+              secretEntries.push([id, value]);
+            } else if (typeof previousValue === "string" && previousValue.length > 0) {
+              keychainIdsToDelete.push(id);
+            }
+          }
+
+          return { secretEntries, keychainIdsToDelete };
+        });
+        const hydrateFromKeychain = jest.fn(async (settings: CopilotSettings) => {
+          const hydrated = { ...settings } as unknown as Record<string, unknown>;
+          for (const [key, id] of secretFields) {
+            const value = storedSecrets.get(id);
+            if (value !== undefined) hydrated[key] = value;
+          }
+          return { settings: hydrated as unknown as CopilotSettings, hadFailures: false };
+        });
+        const { module } = await loadModule({
+          persistSecrets,
+          hydrateFromKeychain,
+          setSecretById: jest.fn((id: string, value: string) => {
+            storedSecrets.set(id, value);
+          }),
+        });
+        const diskSnapshots: CopilotSettings[] = [];
+        const saveData = jest.fn(async (data: CopilotSettings) => {
+          diskSnapshots.push(data);
+        });
+        const initial = makeSettings({
+          [keyField]: "provider-secret",
+          openAIApiKey: "sk-unrelated",
+        });
+        const empty = makeSettings({
+          [keyField]: "",
+          openAIApiKey: "",
+        });
+
+        await module.persistSettings(initial, saveData, empty);
+        const cleared = makeSettings({
+          [keyField]: "",
+          openAIApiKey: "sk-unrelated",
+        });
+        await module.persistSettings(cleared, saveData, initial);
+
+        expect(storedSecrets.get(providerId)).toBe("");
+        expect(storedSecrets.get(openAiId)).toBe("sk-unrelated");
+        expect(diskSnapshots).toHaveLength(2);
+        for (const snapshot of diskSnapshots) {
+          expect(snapshot[keyField]).toBe("");
+          expect(snapshot.openAIApiKey).toBe("");
+        }
+
+        const sparseDisk = {
+          _keychainVaultId: "abcd1234",
+          activeModels: [],
+        } as unknown as CopilotSettings;
+        expect(sparseDisk).not.toHaveProperty(keyField);
+        expect(sparseDisk).not.toHaveProperty("openAIApiKey");
+        const reloaded = await module.loadSettingsWithKeychain(
+          APP,
+          sparseDisk,
+          jest.fn().mockResolvedValue(undefined),
+          backedUp
+        );
+
+        expect(reloaded[keyField]).toBe("");
+        expect(reloaded.openAIApiKey).toBe("sk-unrelated");
+        expect(hydrateFromKeychain).toHaveBeenCalledWith(
+          expect.not.objectContaining({
+            [keyField]: "provider-secret",
+            openAIApiKey: "sk-unrelated",
+          })
+        );
+      }
+    );
+
     it("rolls Keychain values back when the disk save fails", async () => {
       const persistSecrets = jest
         .fn()

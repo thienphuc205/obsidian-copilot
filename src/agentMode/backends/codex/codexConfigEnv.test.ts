@@ -1,4 +1,7 @@
-import { mergeCodexConfigEnv } from "@/agentMode/backends/codex/codexConfigEnv";
+import {
+  codexScopeInstructionLine,
+  mergeCodexConfigEnv,
+} from "@/agentMode/backends/codex/codexConfigEnv";
 
 describe("codexConfigEnv", () => {
   describe("mergeCodexConfigEnv()", () => {
@@ -33,6 +36,36 @@ describe("codexConfigEnv", () => {
         approvals_reviewer: "user",
         sandbox_mode: "workspace-write",
       });
+    });
+
+    it("appends the vault-selection confinement line to the developer instructions", () => {
+      const config = JSON.parse(
+        mergeCodexConfigEnv(undefined, "Use the vault.", { workspaceRoot: "/vault/Research" })
+      );
+      expect(config.developer_instructions).toBe(
+        "Use the vault.\n" + codexScopeInstructionLine("/vault/Research")
+      );
+      expect(config.developer_instructions).toContain(
+        "Workspace-write is confined to /vault/Research; treat it as the only writable area for this session."
+      );
+      // The pinned sandbox fields stay untouched by the appended directive.
+      expect(config.sandbox_mode).toBe("workspace-write");
+      expect(config.approval_policy).toBe("on-request");
+      expect(config.approvals_reviewer).toBe("user");
+    });
+
+    it("leaves the developer instructions unchanged without a workspace root", () => {
+      expect(
+        JSON.parse(mergeCodexConfigEnv(undefined, "Use the vault.")).developer_instructions
+      ).toBe("Use the vault.");
+    });
+  });
+
+  describe("codexScopeInstructionLine()", () => {
+    it("names the session cwd as the only writable area", () => {
+      expect(codexScopeInstructionLine("/vault/Research")).toBe(
+        "Workspace-write is confined to /vault/Research; treat it as the only writable area for this session."
+      );
     });
   });
 });

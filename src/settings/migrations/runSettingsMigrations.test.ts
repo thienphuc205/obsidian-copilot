@@ -176,7 +176,7 @@ it("v10: makes auth optional for an existing custom OpenAI-compatible provider (
   expect(mockSetSettings).toHaveBeenCalledWith({ settingsVersion: CURRENT_SETTINGS_VERSION });
 });
 
-it("v6: seeds plus for a v5 vault with neither Miyo nor self-host", async () => {
+it("v6: seeds the local backend for a v5 vault with neither Miyo nor self-host", async () => {
   mockGetSettings.mockReturnValue(settings({ settingsVersion: 5 }));
   const { api, setupProvider } = makeApi();
 
@@ -185,7 +185,7 @@ it("v6: seeds plus for a v5 vault with neither Miyo nor self-host", async () => 
   // Only the v6 seed runs for a v5 vault (no BYOK/backfill).
   expect(setupProvider).not.toHaveBeenCalled();
   expect(mockSetSettings).toHaveBeenCalledWith({
-    docProcessorBackend: "plus",
+    docProcessorBackend: "miyo",
   });
 });
 
@@ -204,7 +204,7 @@ it("v6: seeds miyo when Miyo and self-host mode are both on", async () => {
   });
 });
 
-it("v6: seeds plus for a mobile vault with Miyo enabled but self-host off", async () => {
+it("v6: seeds the local backend for a mobile vault with Miyo enabled but self-host off", async () => {
   // enableSelfHostMode is off here, so the doc processor seeds to plus regardless
   // of the mobile Miyo state.
   (Platform as { isMobile: boolean }).isMobile = true;
@@ -222,7 +222,7 @@ it("v6: seeds plus for a mobile vault with Miyo enabled but self-host off", asyn
     await runSettingsMigrations(api);
 
     expect(mockSetSettings).toHaveBeenCalledWith({
-      docProcessorBackend: "plus",
+      docProcessorBackend: "miyo",
     });
   } finally {
     (Platform as { isMobile: boolean }).isMobile = false;

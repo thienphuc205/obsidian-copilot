@@ -1,6 +1,5 @@
 import { CustomModel, getModelKey, ModelConfig } from "@/aiParams";
 import {
-  BREVILABS_MODELS_BASE_URL,
   BUILTIN_CHAT_MODELS,
   ChatModelProviders,
   DEFAULT_OLLAMA_NUM_CTX,
@@ -20,10 +19,9 @@ import { ChatGroq } from "@langchain/groq";
 import { ChatOllama } from "@langchain/ollama";
 import { ChatOpenAI } from "@langchain/openai";
 import { ChatXAI } from "@langchain/xai";
-import { MissingApiKeyError, MissingPlusLicenseError } from "@/error";
+import { MissingApiKeyError } from "@/error";
 import { ChatOpenRouter } from "./ChatOpenRouter";
 import { ChatLMStudio } from "./ChatLMStudio";
-import { BrevilabsClient } from "./brevilabsClient";
 import type { SafetySetting } from "@google/generative-ai";
 
 const GOOGLE_SAFETY_SETTINGS_BLOCK_NONE: SafetySetting[] = [
@@ -65,7 +63,6 @@ const CHAT_PROVIDER_CONSTRUCTORS = {
   [ChatModelProviders.GROQ]: ChatGroq,
   [ChatModelProviders.OPENAI_FORMAT]: ChatOpenAI,
   [ChatModelProviders.SILICONFLOW]: ChatOpenAI,
-  [ChatModelProviders.COPILOT_PLUS]: ChatOpenRouter,
   [ChatModelProviders.MISTRAL]: ChatOpenAI,
   [ChatModelProviders.DEEPSEEK]: ChatDeepSeek,
 } as const;
@@ -88,7 +85,13 @@ export default class ChatModelManager {
 
   private static readonly ANTHROPIC_THINKING_BUDGET_TOKENS = 2048;
 
-  private readonly providerApiKeyMap: Record<ChatModelProviders, () => string> = {
+  /**
+   * Legacy top-level keys per provider. `Partial` because a provider can be
+   * removed from the built-in set while the persisted enum still names it
+   * (legacy `activeModels` rows); `hasProviderCredentials` then falls back to
+   * the model's own `apiKey`.
+   */
+  private readonly providerApiKeyMap: Partial<Record<ChatModelProviders, () => string>> = {
     [ChatModelProviders.OPENAI]: () => getSettings().openAIApiKey,
     [ChatModelProviders.GOOGLE]: () => getSettings().googleApiKey,
     [ChatModelProviders.ANTHROPIC]: () => getSettings().anthropicApiKey,
@@ -99,7 +102,6 @@ export default class ChatModelManager {
     [ChatModelProviders.OLLAMA]: () => "default-key",
     [ChatModelProviders.LM_STUDIO]: () => "default-key",
     [ChatModelProviders.OPENAI_FORMAT]: () => "default-key",
-    [ChatModelProviders.COPILOT_PLUS]: () => getSettings().plusLicenseKey,
     [ChatModelProviders.MISTRAL]: () => getSettings().mistralApiKey,
     [ChatModelProviders.DEEPSEEK]: () => getSettings().deepseekApiKey,
     [ChatModelProviders.SILICONFLOW]: () => getSettings().siliconflowApiKey,
@@ -332,33 +334,6 @@ export default class ChatModelManager {
         },
         ...this.getOpenAISpecialConfig(modelName, maxTokens, customModel),
       },
-      [ChatModelProviders.COPILOT_PLUS]: {
-        modelName: modelName,
-        apiKey: await this.resolveApiKey(
-          customModel.apiKey,
-          settings.plusLicenseKey,
-          allowLegacyCredentialFallback
-        ),
-        configuration: {
-          baseURL: BREVILABS_MODELS_BASE_URL,
-          fetch: safeFetchNoThrow,
-          defaultHeaders: BrevilabsClient.getInstance().getPluginVersionHeaders(),
-        },
-        // Reasoning is opt-in: forward the user's per-model effort pick only for
-        // REASONING-capable models, and gate enableReasoning on an EXPLICIT effort.
-        // Without an effort, ChatOpenRouter.invocationParams falls back to
-        // `reasoning: { max_tokens: 1024 }`, which would make the default-on
-        // copilot-plus-flash spend reasoning budget/latency despite being the fast
-        // default. So flash stays fast until the user picks an effort.
-        enableReasoning:
-          (customModel.capabilities?.includes(ModelCapability.REASONING) ?? false) &&
-          !!customModel.reasoningEffort,
-        reasoningEffort:
-          customModel.capabilities?.includes(ModelCapability.REASONING) &&
-          customModel.reasoningEffort
-            ? customModel.reasoningEffort
-            : undefined,
-      },
       [ChatModelProviders.MISTRAL]: {
         modelName,
         apiKey: await this.resolveApiKey(
@@ -459,7 +434,17 @@ export default class ChatModelManager {
           return;
         }
 
-        const constructor = this.getProviderConstructor(model);
+        // A persisted row may name a provider whose constructor the built-in
+        // set no longer maps (the legacy enum outlives removed providers). Skip
+        // it rather than throwing out of the settings subscriber.
+        const constructor = CHAT_PROVIDER_CONSTRUCTORS[
+          model.provider as keyof typeof CHAT_PROVIDER_CONSTRUCTORS
+        ] as ChatConstructorType | undefined;
+        if (!constructor) {
+          logWarn(`No constructor for provider: ${model.provider} for model: ${model.name}`);
+          return;
+        }
+
         const hasCredentials = this.hasProviderCredentials(model);
         const modelKey = getModelKeyFromModel(model);
         modelMap[modelKey] = {
@@ -496,9 +481,9 @@ export default class ChatModelManager {
   }
 
   getProviderConstructor(model: CustomModel): ChatConstructorType {
-    const constructor: ChatConstructorType = CHAT_PROVIDER_CONSTRUCTORS[
-      model.provider as ChatModelProviders
-    ] as unknown as ChatConstructorType;
+    const constructor = CHAT_PROVIDER_CONSTRUCTORS[
+      model.provider as keyof typeof CHAT_PROVIDER_CONSTRUCTORS
+    ] as ChatConstructorType | undefined;
     if (!constructor) {
       logWarn(`Unknown provider: ${model.provider} for model: ${model.name}`);
       throw new Error(`Unknown provider: ${model.provider} for model: ${model.name}`);
@@ -563,13 +548,7 @@ export default class ChatModelManager {
       throw new Error(`No model found for: ${modelKey}`);
     }
     if (!selectedModel.hasApiKey) {
-      const errorMessage = `API key is not provided for the model: ${modelKey}.`;
-      if ((model.provider as ChatModelProviders) === ChatModelProviders.COPILOT_PLUS) {
-        throw new MissingPlusLicenseError(
-          "Copilot Plus license key is not configured. Please enter your license key in the Copilot Plus section at the top of Basic Settings."
-        );
-      }
-      throw new MissingApiKeyError(errorMessage);
+      throw new MissingApiKeyError(`API key is not provided for the model: ${modelKey}.`);
     }
 
     return this.instantiateChatModel(
@@ -590,11 +569,6 @@ export default class ChatModelManager {
    */
   async createModelInstanceFromBridged(model: CustomModel): Promise<BaseChatModel> {
     if (!this.hasProviderCredentials(model, false)) {
-      if ((model.provider as ChatModelProviders) === ChatModelProviders.COPILOT_PLUS) {
-        throw new MissingPlusLicenseError(
-          "Copilot Plus license key is not configured. Please enter your license key in the Copilot Plus section at the top of Basic Settings."
-        );
-      }
       throw new MissingApiKeyError(`API key is not provided for the model: ${model.name}.`);
     }
 
@@ -691,10 +665,9 @@ export default class ChatModelManager {
     // lookup. Chat-backend (bridged) models live in the Provider/ConfiguredModel
     // registries and carry the full capability set derived from their
     // modalities/reasoning (`configuredModelToCustomModel`). A model whose wire id
-    // ALSO exists in legacy `settings.activeModels` — notably `copilot-plus-flash`,
-    // whose built-in entry advertises only VISION — would otherwise mask the
-    // bridged REASONING/VISION capabilities, so a capability check
-    // (CopilotPlusChainRunner.hasCapability / isMultimodalModel) reads `false` and
+    // ALSO exists in legacy `settings.activeModels` — for example an older
+    // built-in entry advertising a smaller capability set — would otherwise mask
+    // the bridged capabilities, so a capability check reads `false` and
     // reasoning/image content is dropped. The bridged model is the one actually
     // running, so it wins.
     if (

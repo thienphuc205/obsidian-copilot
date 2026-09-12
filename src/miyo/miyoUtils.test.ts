@@ -173,16 +173,16 @@ describe("seedDocProcessorBackend", () => {
     ).toBe("miyo");
   });
 
-  it("returns 'plus' when self-host mode is off", () => {
+  it("always seeds the local backend now that the relay is gone (self-host off)", () => {
     expect(
       seedDocProcessorBackend(capSettings({ enableSelfHostMode: false, enableMiyo: true }))
-    ).toBe("plus");
+    ).toBe("miyo");
   });
 
-  it("returns 'plus' when Miyo is disabled", () => {
+  it("stays local when Miyo is disabled (fail-closed at parse time)", () => {
     expect(
       seedDocProcessorBackend(capSettings({ enableSelfHostMode: true, enableMiyo: false }))
-    ).toBe("plus");
+    ).toBe("miyo");
   });
 });
 

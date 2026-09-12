@@ -14,7 +14,6 @@ export type ModelApiKeySettings = Pick<
   | "openRouterAiApiKey"
   | "cohereApiKey"
   | "xaiApiKey"
-  | "plusLicenseKey"
   | "mistralApiKey"
   | "deepseekApiKey"
   | "siliconflowApiKey"
@@ -24,7 +23,6 @@ const PROVIDERS_WITHOUT_API_KEYS: ReadonlySet<Provider> = new Set([
   ChatModelProviders.OPENAI_FORMAT,
   ChatModelProviders.OLLAMA,
   ChatModelProviders.LM_STUDIO,
-  ChatModelProviders.COPILOT_PLUS,
 ]);
 
 export function getProviderLabel(provider: string, model?: CustomModel): string {

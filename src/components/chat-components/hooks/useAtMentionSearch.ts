@@ -29,14 +29,13 @@ export function useAtMentionSearch(
   query: string,
   mode: "category" | "search",
   selectedCategory: AtMentionCategory | undefined,
-  isCopilotPlus: boolean,
   showTools: boolean,
   availableCategoryOptions: CategoryOption[],
   currentActiveFile: TFile | null = null,
   agentBrands: ReadonlyArray<AgentMentionBrand> = EMPTY_AGENT_MENTION_BRANDS
 ): (CategoryOption | AtMentionOption)[] {
   // Get raw data without pre-filtering
-  const allNotes = useAllNotes(isCopilotPlus);
+  const allNotes = useAllNotes();
   const allFolders = useAllFolders();
 
   // Only enable web tab polling when actually needed:

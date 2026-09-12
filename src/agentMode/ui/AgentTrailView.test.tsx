@@ -151,6 +151,45 @@ describe("AgentTrail", () => {
     expect(screen.queryByTitle("Insert / Replace at cursor")).toBeNull();
   });
 
+  it("shows validated BYOK web sources inside the expanded tool card", () => {
+    const openSpy = jest.spyOn(window, "open").mockReturnValue(window);
+    renderTrail({
+      parts: [
+        {
+          kind: "tool_call",
+          id: "web-1",
+          title: "web_search",
+          status: "completed",
+          mcpServer: "copilot-web",
+          sourceReferences: [
+            {
+              title: "Example documentation",
+              path: "https://example.test/docs",
+              url: "https://example.test/docs",
+              kind: "web",
+              score: 0,
+            },
+          ],
+        },
+      ],
+    });
+
+    const card = screen.getByRole("button", { name: /Web search/i });
+    expect(screen.queryByText("Example documentation")).toBeNull();
+    fireEvent.click(card);
+
+    const source = screen.getByRole("link", { name: "Open source: Example documentation" });
+    expect(source.getAttribute("href")).toBe("https://example.test/docs");
+    expect(source.getAttribute("target")).toBe("_blank");
+    fireEvent.click(source);
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://example.test/docs",
+      "_blank",
+      "noopener,noreferrer"
+    );
+    openSpy.mockRestore();
+  });
+
   it("shows the timestamp with response controls when a completed duration is unavailable", () => {
     renderTrail({ timestamp: "2026/08/07 20:31:10" });
 

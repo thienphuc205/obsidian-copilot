@@ -17,7 +17,6 @@ interface AtMentionTypeaheadProps {
     category: AtMentionCategory,
     data: TFile | string | TFolder | WebTabContext | null
   ) => void;
-  isCopilotPlus?: boolean;
   /** Whether to surface Copilot built-in `@` tools (category + search hits). */
   showTools?: boolean;
   currentActiveFile?: TFile | null;
@@ -36,7 +35,6 @@ export function AtMentionTypeahead({
   isOpen,
   onClose,
   onSelect,
-  isCopilotPlus = false,
   showTools = false,
   currentActiveFile = null,
 }: AtMentionTypeaheadProps) {
@@ -58,7 +56,6 @@ export function AtMentionTypeahead({
     searchQuery,
     extendedState.mode,
     extendedState.selectedCategory,
-    isCopilotPlus,
     showTools,
     availableCategoryOptions,
     currentActiveFile

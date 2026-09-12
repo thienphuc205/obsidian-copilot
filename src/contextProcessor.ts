@@ -1,14 +1,12 @@
 import { getSelectedTextContexts } from "@/aiParams";
-import { ChainType } from "@/chainType";
-import { RESTRICTION_MESSAGES } from "@/constants";
 import { logWarn, logInfo, logError } from "@/logger";
 import { escapeXml } from "@/LLMProviders/chainRunner/utils/xmlParsing";
 import { getWebViewerService } from "@/services/webViewerService/webViewerServiceSingleton";
 import { WebViewerTimeoutError } from "@/services/webViewerService/webViewerServiceTypes";
 import { FileParserManager } from "@/tools/FileParserManager";
-import { isPlusChain, isTextReadableFile } from "@/utils";
 import { normalizeUrlString } from "@/utils/urlNormalization";
-import { App, TFile, Vault, Notice } from "obsidian";
+import type { SourceReference } from "@/context/sourceReferences";
+import { App, TFile, Vault } from "obsidian";
 import {
   NOTE_CONTEXT_PROMPT_TAG,
   EMBEDDED_PDF_TAG,
@@ -57,6 +55,20 @@ interface MarkdownSegment {
   found: boolean;
 }
 
+interface ParsedContextNote {
+  content: string;
+  sources?: readonly SourceReference[];
+}
+
+type SourceCollector = (sources: readonly SourceReference[]) => void;
+
+type SourceAwareFileParserManager = FileParserManager & {
+  parseFileWithSources?: (
+    file: TFile,
+    vault: Vault
+  ) => Promise<{ content: string; sources: readonly SourceReference[] }>;
+};
+
 export class ContextProcessor {
   private static instance: ContextProcessor;
   private app: App;
@@ -80,6 +92,21 @@ export class ContextProcessor {
       ContextProcessor.instance = new ContextProcessor(app);
     }
     return ContextProcessor.instance;
+  }
+
+  private async parseContextNote(
+    note: TFile,
+    vault: Vault,
+    fileParserManager: FileParserManager
+  ): Promise<ParsedContextNote> {
+    if (note.extension === "pdf") {
+      const sourceAwareFileParserManager = fileParserManager as SourceAwareFileParserManager;
+      if (typeof sourceAwareFileParserManager.parseFileWithSources === "function") {
+        return await sourceAwareFileParserManager.parseFileWithSources(note, vault);
+      }
+    }
+
+    return { content: await fileParserManager.parseFile(note, vault) };
   }
 
   async processEmbeddedPDFs(
@@ -291,16 +318,13 @@ export class ContextProcessor {
   private async buildMarkdownContextContent(
     note: TFile,
     vault: Vault,
-    fileParserManager: FileParserManager,
-    chainType: ChainType
+    fileParserManager: FileParserManager
   ): Promise<string> {
     let content = await fileParserManager.parseFile(note, vault);
 
-    content = await this.processEmbeddedNotes(content, note, vault, fileParserManager, chainType);
+    content = await this.processEmbeddedNotes(content, note, vault, fileParserManager);
 
-    if (isPlusChain(chainType)) {
-      content = await this.processEmbeddedPDFs(content, vault, fileParserManager);
-    }
+    content = await this.processEmbeddedPDFs(content, vault, fileParserManager);
 
     return await this.processDataviewBlocks(content, note.path);
   }
@@ -316,15 +340,13 @@ export class ContextProcessor {
    * @param sourceNote - The note containing this content (for relative link resolution)
    * @param vault - Obsidian vault instance
    * @param fileParserManager - Manager for parsing different file types
-   * @param chainType - Current chain type (affects feature availability)
    * @returns Content with top-level embeds replaced by structured blocks
    */
   private async processEmbeddedNotes(
     content: string,
     sourceNote: TFile,
     vault: Vault,
-    fileParserManager: FileParserManager,
-    chainType: ChainType
+    fileParserManager: FileParserManager
   ): Promise<string> {
     const embedRegex = /!\[\[([^\]]+)\]\]/g;
     let match: RegExpExecArray | null;
@@ -339,8 +361,7 @@ export class ContextProcessor {
         match[0],
         sourceNote,
         vault,
-        fileParserManager,
-        chainType
+        fileParserManager
       );
       result += replacement;
       lastIndex = match.index + match[0].length;
@@ -358,8 +379,7 @@ export class ContextProcessor {
     rawMatch: string,
     sourceNote: TFile,
     vault: Vault,
-    fileParserManager: FileParserManager,
-    chainType: ChainType
+    fileParserManager: FileParserManager
   ): Promise<string> {
     const target = this.parseEmbeddedLinkTarget(rawTarget);
     if (!target) {
@@ -399,9 +419,7 @@ export class ContextProcessor {
         embeddedContent = segment.content;
       }
 
-      if (isPlusChain(chainType)) {
-        embeddedContent = await this.processEmbeddedPDFs(embeddedContent, vault, fileParserManager);
-      }
+      embeddedContent = await this.processEmbeddedPDFs(embeddedContent, vault, fileParserManager);
 
       embeddedContent = await this.processDataviewBlocks(embeddedContent, resolvedFile.path);
 
@@ -564,7 +582,7 @@ export class ContextProcessor {
    * Processes context notes, excluding any already handled by custom prompts.
    *
    * NOTE: This method reads and includes note content as-is. URLs within note content
-   * are NOT extracted or processed with url4llm. Only URLs directly typed in the user's
+   * are NOT extracted or converted. Only URLs directly typed in the user's
    * chat input are processed, not URLs that happen to be in the content of context notes.
    *
    * @param excludedNotePaths A set of file paths that should be skipped.
@@ -573,7 +591,7 @@ export class ContextProcessor {
    * @param contextNotes
    * @param includeActiveNote
    * @param activeNote
-   * @param currentChain
+   * @param onSources Optional receiver for source references returned by supported parsers.
    * @returns The combined content string of the processed context notes.
    */
   async processContextNotes(
@@ -583,7 +601,7 @@ export class ContextProcessor {
     contextNotes: TFile[],
     includeActiveNote: boolean,
     activeNote: TFile | null,
-    currentChain: ChainType
+    onSources?: SourceCollector
   ): Promise<string> {
     let additionalContext = "";
 
@@ -601,27 +619,24 @@ export class ContextProcessor {
           return;
         }
 
-        // 2. Apply chain restrictions only to supported files that are NOT text-readable
-        if (!isPlusChain(currentChain) && !isTextReadableFile(note)) {
-          // This file type is supported, but requires Plus mode (e.g., PDF)
-          logWarn(`File type ${note.extension} requires Copilot Plus mode for context processing.`);
-          // Show user-facing notice about the restriction
-          new Notice(RESTRICTION_MESSAGES.NON_MARKDOWN_FILES_RESTRICTED);
-          return;
-        }
-
-        // 3. If we reach here, parse the file (md, canvas, or other supported type in Plus mode)
-        const content =
+        // 2. Parse the file (md, canvas, or another supported type). Unsupported
+        // conversions fail closed inside the parser and surface as error blocks.
+        const parsedNote =
           note.extension === "md"
-            ? await this.buildMarkdownContextContent(note, vault, fileParserManager, currentChain)
-            : await fileParserManager.parseFile(note, vault);
+            ? {
+                content: await this.buildMarkdownContextContent(note, vault, fileParserManager),
+              }
+            : await this.parseContextNote(note, vault, fileParserManager);
 
         // Get file metadata
         const stats = await vault.adapter.stat(note.path);
         const ctime = stats ? new Date(stats.ctime).toISOString() : "Unknown";
         const mtime = stats ? new Date(stats.mtime).toISOString() : "Unknown";
 
-        additionalContext += `\n\n<${prompt_tag}>\n<title>${escapeXml(note.basename)}</title>\n<path>${note.path}</path>\n<ctime>${ctime}</ctime>\n<mtime>${mtime}</mtime>\n<content>\n${content}\n</content>\n</${prompt_tag}>`;
+        additionalContext += `\n\n<${prompt_tag}>\n<title>${escapeXml(note.basename)}</title>\n<path>${note.path}</path>\n<ctime>${ctime}</ctime>\n<mtime>${mtime}</mtime>\n<content>\n${parsedNote.content}\n</content>\n</${prompt_tag}>`;
+        if (parsedNote.sources && parsedNote.sources.length > 0) {
+          onSources?.(parsedNote.sources);
+        }
       } catch (error) {
         logError(`Error processing file ${note.path}:`, error);
         additionalContext += `\n\n<${prompt_tag}_error>\n<title>${escapeXml(note.basename)}</title>\n<path>${note.path}</path>\n<error>[Error: Could not process file]</error>\n</${prompt_tag}_error>`;

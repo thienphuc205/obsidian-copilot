@@ -25,6 +25,7 @@ import { AlertTriangle, MessageCircle } from "lucide-react";
 import React from "react";
 import { ChatModelEnableList } from "./ChatModelEnableList";
 import { ConfiguredModelEnableList } from "./ConfiguredModelEnableList";
+import { AgentWebSettings } from "./AgentWebSettings";
 import { AgentNotificationSoundSettings } from "./ui/AgentNotificationSoundSettings";
 
 /** Synthetic sub-tab id for the (non-backend) Quick Chat model curation. */
@@ -115,6 +116,20 @@ export const AgentSettings: React.FC = () => {
           }
           options={orderedDescriptors.map((d) => ({ label: d.displayName, value: d.id }))}
         />
+        <SettingItem
+          type="select"
+          title="Agent filesystem sandbox"
+          description="Bounds agent write access to the notes/folders you attach in the session. Strict is best-effort per backend; shell commands stay prompt-gated."
+          value={settings.agentScopeMode}
+          onChange={(value) => {
+            if (value !== "off" && value !== "selected-context") return;
+            updateSetting("agentScopeMode", value);
+          }}
+          options={[
+            { label: "Off (vault-wide)", value: "off" },
+            { label: "Strict — selected context only", value: "selected-context" },
+          ]}
+        />
         <AgentNotificationSoundSettings
           enabled={settings.agentMode.notificationSound}
           onEnabledChange={(enabled) =>
@@ -165,6 +180,7 @@ export const AgentSettings: React.FC = () => {
           <QuickChatPanel />
         </TabContent>
       </div>
+      <AgentWebSettings />
     </section>
   );
 };

@@ -1,4 +1,3 @@
-import { BrevilabsClient } from "@/LLMProviders/brevilabsClient";
 import { err2String } from "@/errorFormat";
 import { logInfo, logWarn } from "@/logger";
 import { getCachedProjectRecordById } from "@/projects/state";
@@ -133,7 +132,7 @@ const EMPTY_PROJECT_CONTEXT_BLOCK = [
  * Per-project single-flight guard. Concurrent cold-start sessions for the same
  * project (e.g. the user opens a second chat / a history-load races the first)
  * would otherwise each miss the disk cheap-skip before the first write lands and
- * redundantly hit brevilabs + race on the same hash-named cache files. The map
+ * redundantly convert the same sources + race on the same hash-named cache files. The map
  * entry is cleared once the promise settles, so a later call re-evaluates fresh
  * on-disk fingerprints (idempotent). Mirrors `inFlightMigrations`.
  *
@@ -508,23 +507,26 @@ async function runMaterialize(
   }
 }
 
-/** Brevilabs-backed converters. Empty results throw so no useless cache file is written. */
+/**
+ * Local-only converters. Remote context conversion (URL/YouTube fetch, binary
+ * document parse) was a hosted-relay feature that this fork removes, and no
+ * local converter is wired into this path — so every converter source fails with
+ * an explanatory message and materializeSources marks it failed (existing stale
+ * snapshots still serve), exactly like any other failed source. Folder/note
+ * materialization is unaffected: it reads the vault directly and never touches
+ * these converters.
+ */
 function createConverters(): ContextConverters {
   return {
     fetchRemote: async (source) => {
-      const client = BrevilabsClient.getInstance();
-      const content =
-        source.type === "youtube"
-          ? ((await client.youtube4llm(source.url)).response?.transcript ?? "")
-          : ((await client.url4llm(source.url)).response ?? "");
-      if (!content.trim()) throw new Error(`empty content for ${source.url}`);
-      return content;
+      throw new Error(
+        `No local converter available for ${source.url} (${source.type}); remote context conversion is not supported.`
+      );
     },
-    parseFile: async (bytes, ext) => {
-      const { response } = await BrevilabsClient.getInstance().docs4llm(bytes, ext);
-      const content = docs4llmToText(response);
-      if (!content.trim()) throw new Error(`empty parse result for .${ext}`);
-      return content;
+    parseFile: async (_bytes, ext) => {
+      throw new Error(
+        `No local document processor available for .${ext} files; enable Miyo to convert this file type locally.`
+      );
     },
   };
 }
@@ -605,17 +607,6 @@ export async function materializeProjectContextSource(
     return [
       { source: item.source, kind: item.kind, error: err2String(err), usedStaleSnapshot: false },
     ];
-  }
-}
-
-/** docs4llm's `response` is `unknown` — normalize to text for the cache file. */
-function docs4llmToText(response: unknown): string {
-  if (typeof response === "string") return response;
-  try {
-    return JSON.stringify(response, null, 2);
-  } catch (err) {
-    logWarn(`[project-context] could not stringify docs4llm response: ${err2String(err)}`);
-    return "";
   }
 }
 
