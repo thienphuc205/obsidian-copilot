@@ -3,6 +3,9 @@ import type { SelfHostSearchProvider } from "@/settings/model";
 import { ArrowUpRight } from "lucide-react";
 import React from "react";
 
+/** A provider that owns its own credential row (everything except auto). */
+type KeyedSearchProvider = Exclude<SelfHostSearchProvider, "auto">;
+
 interface SearchProviderConfig {
   apiKeyTitle: string;
   description: string;
@@ -11,7 +14,7 @@ interface SearchProviderConfig {
   signupUrl: string;
 }
 
-const SEARCH_PROVIDER_CONFIGS: Record<SelfHostSearchProvider, SearchProviderConfig> = {
+const SEARCH_PROVIDER_CONFIGS: Record<KeyedSearchProvider, SearchProviderConfig> = {
   firecrawl: {
     apiKeyTitle: "Firecrawl API Key",
     description: "Web search & fetch via Firecrawl.",
@@ -44,15 +47,67 @@ const SEARCH_PROVIDER_CONFIGS: Record<SelfHostSearchProvider, SearchProviderConf
   },
 };
 
-const SEARCH_PROVIDER_OPTIONS = Object.entries(SEARCH_PROVIDER_CONFIGS).map(([value, config]) => ({
-  label: config.label,
-  value,
-}));
+/** Credential fields shown together when auto merges every configured provider. */
+const KEYED_SEARCH_PROVIDERS = Object.keys(SEARCH_PROVIDER_CONFIGS) as KeyedSearchProvider[];
+
+const AUTO_SEARCH_PROVIDER = {
+  label: "Auto (merge all configured)",
+  description: "Queries every provider with a configured key in parallel and merges results.",
+} as const;
+
+const SEARCH_PROVIDER_OPTIONS = [
+  { label: AUTO_SEARCH_PROVIDER.label, value: "auto" },
+  ...Object.entries(SEARCH_PROVIDER_CONFIGS).map(([value, config]) => ({
+    label: config.label,
+    value,
+  })),
+];
+
+interface ProviderKeyFieldProps {
+  apiKeys: Readonly<Record<KeyedSearchProvider, string>>;
+  disabled: boolean;
+  onApiKeyChange: (provider: KeyedSearchProvider, value: string) => void;
+  provider: KeyedSearchProvider;
+}
+
+/** One provider credential row with its signup link. */
+const ProviderKeyField: React.FC<ProviderKeyFieldProps> = ({
+  apiKeys,
+  disabled,
+  onApiKeyChange,
+  provider,
+}) => {
+  const config = SEARCH_PROVIDER_CONFIGS[provider];
+
+  return (
+    <SettingItem
+      type="password"
+      title={config.apiKeyTitle}
+      description={
+        <span>
+          {config.description}{" "}
+          <a
+            href={config.signupUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="tw-text-accent"
+          >
+            Sign up <ArrowUpRight className="tw-inline tw-size-3 tw-align-text-bottom" />
+          </a>
+        </span>
+      }
+      value={apiKeys[provider]}
+      onChange={(value) => onApiKeyChange(provider, value)}
+      placeholder={config.placeholder}
+      disabled={disabled}
+    />
+  );
+};
 
 export interface SelfHostWebSearchSettingsProps {
-  apiKeys: Readonly<Record<SelfHostSearchProvider, string>>;
+  apiKeys: Readonly<Record<KeyedSearchProvider, string>>;
   disabled: boolean;
-  onApiKeyChange: (provider: SelfHostSearchProvider, value: string) => void;
+  onApiKeyChange: (provider: KeyedSearchProvider, value: string) => void;
   onProviderChange: (provider: SelfHostSearchProvider) => void;
   provider: SelfHostSearchProvider;
 }
@@ -68,8 +123,6 @@ export const SelfHostWebSearchSettings: React.FC<SelfHostWebSearchSettingsProps>
   onProviderChange,
   provider,
 }) => {
-  const config = SEARCH_PROVIDER_CONFIGS[provider];
-
   return (
     <>
       <SettingItem
@@ -82,27 +135,27 @@ export const SelfHostWebSearchSettings: React.FC<SelfHostWebSearchSettingsProps>
         disabled={disabled}
       />
 
-      <SettingItem
-        type="password"
-        title={config.apiKeyTitle}
-        description={
-          <span>
-            {config.description}{" "}
-            <a
-              href={config.signupUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="tw-text-accent"
-            >
-              Sign up <ArrowUpRight className="tw-inline tw-size-3 tw-align-text-bottom" />
-            </a>
-          </span>
-        }
-        value={apiKeys[provider]}
-        onChange={(value) => onApiKeyChange(provider, value)}
-        placeholder={config.placeholder}
-        disabled={disabled}
-      />
+      {provider === "auto" ? (
+        <>
+          <div className="tw-px-1 tw-text-xs tw-text-muted">{AUTO_SEARCH_PROVIDER.description}</div>
+          {KEYED_SEARCH_PROVIDERS.map((keyedProvider) => (
+            <ProviderKeyField
+              key={keyedProvider}
+              apiKeys={apiKeys}
+              disabled={disabled}
+              onApiKeyChange={onApiKeyChange}
+              provider={keyedProvider}
+            />
+          ))}
+        </>
+      ) : (
+        <ProviderKeyField
+          apiKeys={apiKeys}
+          disabled={disabled}
+          onApiKeyChange={onApiKeyChange}
+          provider={provider}
+        />
+      )}
     </>
   );
 };

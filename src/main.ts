@@ -388,10 +388,6 @@ export default class CopilotPlugin extends Plugin {
     } catch (error) {
       logError("Failed to move the Symposium publishing folder to .openartifacts.", error);
     }
-    // The relay publisher was removed with the hosted publish path. The
-    // PUBLISH command registration lives in `registerCommands` (lead-owned);
-    // until it is cleaned up there, the command is a no-op instead of a
-    // dangling import.
     registerCommands(this);
 
     this.registerEvent(

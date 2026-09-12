@@ -17,7 +17,10 @@ const SEARCH_PROVIDER_KEY_FIELDS = {
   perplexity: "perplexityApiKey",
   parallel: "parallelApiKey",
   exa: "exaApiKey",
-} as const satisfies Record<SelfHostSearchProvider, keyof ReturnType<typeof useSettingsValue>>;
+} as const satisfies Record<
+  Exclude<SelfHostSearchProvider, "auto">,
+  keyof ReturnType<typeof useSettingsValue>
+>;
 
 /** Small "Sign up ↗" affordance appended to a provider key description. */
 const SignUpLink: React.FC<{ href: string }> = ({ href }) => (

@@ -337,7 +337,7 @@ export interface CopilotSettings {
   backends: Partial<Record<BackendType, BackendConfig>>;
 }
 
-export type SelfHostSearchProvider = "firecrawl" | "perplexity" | "parallel" | "exa";
+export type SelfHostSearchProvider = "firecrawl" | "perplexity" | "parallel" | "exa" | "auto";
 
 /**
  * Native Claude permission mode that Copilot's canonical `auto` pill drives.
@@ -1018,9 +1018,9 @@ export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
   }
 
   // Ensure selfHostSearchProvider is a valid value
-  // Persisted Parallel and Exa choices must survive reload instead of silently
-  // reverting to Firecrawl. https://github.com/Brevilabs/obsidian-copilot-private/issues/285
-  const validSearchProviders = ["firecrawl", "perplexity", "parallel", "exa"] as const;
+  // Persisted Parallel, Exa, and Auto choices must survive reload instead of
+  // silently reverting to Firecrawl. https://github.com/Brevilabs/obsidian-copilot-private/issues/285
+  const validSearchProviders = ["firecrawl", "perplexity", "parallel", "exa", "auto"] as const;
   if (!validSearchProviders.includes(sanitizedSettings.selfHostSearchProvider)) {
     sanitizedSettings.selfHostSearchProvider = DEFAULT_SETTINGS.selfHostSearchProvider;
   }

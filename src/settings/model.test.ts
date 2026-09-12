@@ -724,7 +724,7 @@ describe("sanitizeSettings - docProcessorBackend (v6 field)", () => {
 
 describe("model", () => {
   describe("sanitizeSettings()", () => {
-    it.each(["parallel", "exa"] as const)(
+    it.each(["parallel", "exa", "auto"] as const)(
       "preserves the %s self-host search provider (https://github.com/Brevilabs/obsidian-copilot-private/issues/285)",
       (provider) => {
         const sanitized = sanitizeSettings({

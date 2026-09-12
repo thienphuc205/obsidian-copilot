@@ -29,12 +29,6 @@ jest.mock("@/contextProcessor", () => ({
   },
 }));
 
-jest.mock("@/mentions/Mention", () => ({
-  Mention: {
-    getInstance: jest.fn().mockReturnValue({}),
-  },
-}));
-
 jest.mock("@/context/PromptContextEngine", () => ({
   PromptContextEngine: {
     getInstance: jest.fn().mockReturnValue({}),

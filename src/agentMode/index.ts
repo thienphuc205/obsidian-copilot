@@ -15,7 +15,6 @@ import { AgentModelPreloader } from "./session/AgentModelPreloader";
 import { AgentSessionIndex } from "./session/AgentSessionIndex";
 import { createNodeFileStorage } from "./session/nodeFileStorage";
 import { AgentSessionManager } from "./session/AgentSessionManager";
-import { seedCopilotDefaultModel } from "./session/copilotDefaultModel";
 import { SkillManager } from "./skills";
 import { planManagedBuiltins } from "./skills/builtin/builtinSkills";
 import { removeSeededBuiltin, seedBuiltinSkills } from "./skills/builtin/seedBuiltinSkills";
@@ -26,11 +25,9 @@ import {
 } from "./ui/permissionPrompter";
 
 export { AGENT_CHAT_MODE } from "@/constants";
-export { AgentModeChat } from "./ui/AgentModeChat";
 export { default as CopilotAgentView } from "./ui/CopilotAgentView";
 export { FloatingAgentChatModal } from "./ui/FloatingAgentChatModal";
 export {
-  useActiveBackendDescriptor,
   useBackendInstallState,
   useManagedInstallActionState,
   useSessionBackendDescriptor,
@@ -102,27 +99,8 @@ export { installMiyoSearchSkill, removeMiyoSearchSkill } from "./skills/builtin/
  * True when the platform supports Agent Mode. Agent Mode is always on, but
  * requires subprocess support, so this is always false on mobile.
  */
-export function isAgentModeEnabled(): boolean {
+function isAgentModeEnabled(): boolean {
   return !Platform.isMobile;
-}
-
-/** Hook variant for symmetry with other settings-derived hooks. */
-export function useIsAgentModeEnabled(): boolean {
-  return isAgentModeEnabled();
-}
-
-/**
- * Seed `configuredModelId` as the default model of every registered backend
- * that can route it — the plugin host's entry point for
- * {@link seedCopilotDefaultModel}, called when a license is applied. Lives here
- * because `session/` may not import the registry, the same reason as
- * `collectAgentSkillsDirsProjectRel` below.
- *
- * @param configuredModelId - The model to install as the default.
- * @returns Ids of the backends whose default was written.
- */
-export function applyCopilotDefaultModel(configuredModelId: string): BackendId[] {
-  return seedCopilotDefaultModel(listBackendDescriptors(), configuredModelId);
 }
 
 /**

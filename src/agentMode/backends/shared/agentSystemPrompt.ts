@@ -39,9 +39,9 @@
  *     `getCurrentTime`, YouTube auto-transcribe) are dropped because that
  *     infrastructure does not exist in Agent Mode. Reusing `DEFAULT_SYSTEM_PROMPT`
  *     verbatim would re-introduce that noise.
- *   - `AGENT_LOOP_GUIDANCE` (`src/LLMProviders/chainRunner/
- *     AutonomousAgentChainRunner.ts`) — the in-process autonomous agent's loop
- *     bullets. Ported verbatim — the agent shape is the same.
+ *   - `AGENT_LOOP_GUIDANCE` (the removed autonomous runner) — the in-process
+ *     autonomous agent's loop bullets. Ported verbatim — the agent shape is the
+ *     same.
  */
 // Import the pill directive from its module rather than the skills barrel: a
 // system-prompt builder needs only this one pure function, not SkillManager,

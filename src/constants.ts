@@ -79,8 +79,7 @@ export const DEFAULT_SYSTEM_PROMPT = `You are Obsidian Copilot, a helpful assist
   10. When generating a table, format as github markdown tables, however, for table headings, immediately add ' |' after the table heading.
   11. Always respond in the language of the user's query.
   12. Do NOT mention the additional context provided such as getCurrentTime and getTimeRangeMs if it's irrelevant to the user message.
-  13. If the user mentions "tags", it most likely means tags in Obsidian note properties.
-  14. YouTube URLs: If the user provides YouTube URLs in their message, transcriptions will be automatically fetched and provided to you. You don't need to do anything special - just use the transcription content if available.`;
+  13. If the user mentions "tags", it most likely means tags in Obsidian note properties.`;
 
 export const COMPOSER_OUTPUT_INSTRUCTIONS = `Return the new note content or canvas JSON in <writeFile> tags.
 
@@ -634,9 +633,6 @@ export const COMMAND_IDS = {
   APPLY_CUSTOM_COMMAND: "apply-custom-command",
   OPEN_LOG_FILE: "open-log-file",
   CLEAR_LOG_FILE: "clear-log-file",
-  DOWNLOAD_YOUTUBE_SCRIPT: "download-youtube-script",
-  // The wire id is persisted by Obsidian in hotkeys and command integrations.
-  PUBLISH_FILE_TO_OPENARTIFACTS: "publish-file-to-symposium",
   TRIGGER_QUICK_ASK: "trigger-quick-ask",
 } as const;
 
@@ -662,8 +658,6 @@ export const COMMAND_NAMES: Record<CommandId, string> = {
   [COMMAND_IDS.APPLY_CUSTOM_COMMAND]: "Apply custom command",
   [COMMAND_IDS.OPEN_LOG_FILE]: "Create log file",
   [COMMAND_IDS.CLEAR_LOG_FILE]: "Clear log file",
-  [COMMAND_IDS.DOWNLOAD_YOUTUBE_SCRIPT]: "Download YouTube Script (plus)",
-  [COMMAND_IDS.PUBLISH_FILE_TO_OPENARTIFACTS]: "Publish file to OpenArtifacts",
   [COMMAND_IDS.TRIGGER_QUICK_ASK]: "Quick Ask",
 };
 
@@ -695,8 +689,6 @@ export const COMMAND_ICONS: Partial<Record<CommandId, string>> = {
   [COMMAND_IDS.COUNT_WORD_AND_TOKENS_SELECTION]: "hash",
   [COMMAND_IDS.OPEN_LOG_FILE]: "file-text",
   [COMMAND_IDS.CLEAR_LOG_FILE]: "file-x",
-  [COMMAND_IDS.DOWNLOAD_YOUTUBE_SCRIPT]: "youtube",
-  [COMMAND_IDS.PUBLISH_FILE_TO_OPENARTIFACTS]: "share-2",
 };
 
 /**
@@ -714,12 +706,7 @@ export const TEXT_READABLE_EXTENSIONS = ["md", "canvas", "base"];
 export const ALLOWED_NOTE_CONTEXT_EXTENSIONS = [...TEXT_READABLE_EXTENSIONS, "pdf"];
 
 export const RESTRICTION_MESSAGES = {
-  NON_MARKDOWN_FILES_RESTRICTED:
-    "Non-markdown files are only available in Copilot Plus mode. Please upgrade to access this file type.",
-  URL_PROCESSING_RESTRICTED:
-    "URL processing is only available in Copilot Plus mode. URLs will not be processed for context.",
-  UNSUPPORTED_FILE_TYPE: (extension: string) =>
-    `${extension.toUpperCase()} files are not supported in the current mode.`,
+  NON_MARKDOWN_FILES_RESTRICTED: "Only Markdown files can be attached as context.",
 } as const;
 
 export const OPENCODE_RELEASE_URL_TEMPLATE =

@@ -24,6 +24,10 @@ const meta = {
 } satisfies Meta<SelfHostWebSearchSettingsProps>;
 export default meta;
 
+export const Auto: StoryObj<SelfHostWebSearchSettingsProps> = {
+  args: { provider: "auto" },
+};
+
 export const Parallel: StoryObj<SelfHostWebSearchSettingsProps> = {
   args: { provider: "parallel" },
 };

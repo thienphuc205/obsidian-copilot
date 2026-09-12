@@ -9,7 +9,6 @@ import {
 } from "@/constants";
 import { logInfo, logWarn } from "@/logger";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import { MemoryVariables } from "@langchain/core/memory";
 import { DateTime } from "luxon";
 import { App, MarkdownView, Notice, TFile, Vault, normalizePath, requestUrl } from "obsidian";
 import { CustomModel } from "./aiParams";
@@ -414,34 +413,6 @@ export interface ChatHistoryEntry {
 }
 
 /**
- * Extract text-only chat history from memory variables.
- * This function pairs messages by index (i, i+1) and returns only string content.
- *
- * Note: For multimodal chains, use
- * chatHistoryUtils.processRawChatHistory instead to preserve image content.
- *
- * @param memoryVariables Memory variables from LangChain memory
- * @returns Array of text-only chat history entries
- */
-// TODO: Deprecated, use chatHistoryUtils.processRawChatHistory instead
-export function extractChatHistory(memoryVariables: MemoryVariables): ChatHistoryEntry[] {
-  const chatHistory: ChatHistoryEntry[] = [];
-  const history = memoryVariables.history as Array<{ content?: string }>;
-
-  for (let i = 0; i < history.length; i += 2) {
-    const userMessage = history[i]?.content || "";
-    const aiMessage = history[i + 1]?.content || "";
-
-    chatHistory.push(
-      { role: "user", content: userMessage },
-      { role: "assistant", content: aiMessage }
-    );
-  }
-
-  return chatHistory;
-}
-
-/**
  * Core logic for extracting note files from wikilink patterns.
  * Resolves note titles/paths to TFile objects, handling both unique titles and full paths.
  *
@@ -551,9 +522,6 @@ export function processVariableNameForNotePath(variableName: string): string {
   return variableName;
 }
 
-const YOUTUBE_URL_REGEX =
-  /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)([^\s&]+)/;
-
 /**
  * Validates a YouTube URL and returns detailed validation result
  */
@@ -614,40 +582,6 @@ export function extractYoutubeVideoId(url: string): string | null {
  */
 export function formatYoutubeUrl(videoId: string): string {
   return `https://www.youtube.com/watch?v=${videoId}`;
-}
-
-/**
- * Check if a string is a valid YouTube URL (legacy function for backward compatibility)
- */
-export function isYoutubeUrl(url: string): boolean {
-  return validateYoutubeUrl(url).isValid;
-}
-
-/**
- * Check if a URL is a Twitter/X URL (e.g. tweet or post link)
- */
-export function isTwitterUrl(url: string): boolean {
-  if (!url || typeof url !== "string") return false;
-  try {
-    const urlObj = new URL(url.trim());
-    return (
-      (urlObj.hostname === "x.com" ||
-        urlObj.hostname === "www.x.com" ||
-        urlObj.hostname === "twitter.com" ||
-        urlObj.hostname === "www.twitter.com") &&
-      urlObj.pathname.includes("/status/")
-    );
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Extract all YouTube URLs from text (legacy function for backward compatibility)
- */
-export function extractAllYoutubeUrls(text: string): string[] {
-  const matches = text.matchAll(new RegExp(YOUTUBE_URL_REGEX, "g"));
-  return Array.from(matches, (match) => match[0]);
 }
 
 /**

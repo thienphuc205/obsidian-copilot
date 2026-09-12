@@ -1,16 +1,11 @@
-import { getStandaloneQuestion } from "@/chainUtils";
 import { TEXT_WEIGHT } from "@/constants";
-import { hasSelfHostSearchKey, selfHostWebSearch } from "@/LLMProviders/selfHostServices";
-import { logError, logInfo, logWarn } from "@/logger";
+import { logInfo, logWarn } from "@/logger";
 import { ImageDescriptionRetriever } from "@/search/v3/ImageDescriptionRetriever";
-import { isSelfHostModeEnabled } from "@/LLMProviders/selfHostMode";
 import { RetrieverFactory } from "@/search/RetrieverFactory";
 import { getSettings } from "@/settings/model";
 import { App } from "obsidian";
 import * as z from "zod";
-import { deduplicateSources } from "@/LLMProviders/chainRunner/utils/toolExecution";
 import { createLangChainTool } from "./createLangChainTool";
-import { getWebSearchCitationInstructions } from "@/LLMProviders/chainRunner/utils/citationUtils";
 import { TieredLexicalRetriever } from "@/search/v3/TieredLexicalRetriever";
 import { FilterRetriever } from "@/search/v3/FilterRetriever";
 
@@ -272,23 +267,6 @@ async function performLexicalSearch({
   return { type: "local_search", documents: allDocs, queryExpansion };
 }
 
-// Explicit lexical-search tool for callers that do not want Miyo routing.
-const createLexicalSearchTool = (app: App) =>
-  createLangChainTool({
-    name: "lexicalSearch",
-    description: "Search for notes using lexical/keyword-based search",
-    schema: localSearchSchema,
-    func: async ({ timeRange: rawTimeRange, query, salientTerms }) => {
-      const timeRange = validateTimeRange(rawTimeRange);
-      return await performLexicalSearch({
-        app,
-        timeRange,
-        query,
-        salientTerms,
-      });
-    },
-  });
-
 /**
  * Validate and sanitize time range to prevent LLM hallucinations.
  * Returns undefined if the time range is invalid, incomplete, or nonsensical.
@@ -442,59 +420,28 @@ const createLocalSearchTool = (app: App) =>
     },
   });
 
-// Define Zod schema for webSearch
-const webSearchSchema = z.object({
-  query: z.string().min(1).describe("The search query to search the internet"),
-  chatHistory: z
-    .array(
-      z.object({
-        role: z.enum(["user", "assistant"]),
-        content: z.string(),
-      })
-    )
-    .describe("Previous conversation turns for context (usually empty array)"),
-});
+export { createLocalSearchTool };
 
-// Add new web search tool
-const webSearchTool = createLangChainTool({
-  name: "webSearch",
-  description:
-    "Search the INTERNET (NOT vault notes) when user explicitly asks for web/online information",
-  schema: webSearchSchema,
-  func: async ({ query, chatHistory }) => {
-    try {
-      // Web search is self-host-only in this fork: without a configured provider
-      // key there is no search backend to call, so fail with an actionable error
-      // document instead of silently returning nothing.
-      if (!isSelfHostModeEnabled() || !hasSelfHostSearchKey()) {
-        return { error: "Web search requires a self-host web search provider key in settings" };
-      }
+/**
+ * Deduplicate sources by path, keeping highest score
+ * If path is not available, falls back to title
+ */
+function deduplicateSources(
+  sources: { title: string; path: string; score: number; explanation?: unknown }[]
+): { title: string; path: string; score: number; explanation?: unknown }[] {
+  const uniqueSources = new Map<
+    string,
+    { title: string; path: string; score: number; explanation?: unknown }
+  >();
 
-      // Get standalone question considering chat history
-      const standaloneQuestion = await getStandaloneQuestion(query, chatHistory);
-
-      const result = await selfHostWebSearch(standaloneQuestion);
-
-      // Return structured JSON response for consistency with other tools
-      // Format as an array of results like localSearch does
-      const formattedResults = [
-        {
-          type: "web_search",
-          content: result.content,
-          citations: result.citations,
-          // Instruct the model to use footnote-style citations and definitions.
-          // Chat UI will render [^n] as [n] for readability and show a simple numbered Sources list.
-          // When inserted into a note, the original [^n] footnotes will remain valid Markdown footnotes.
-          instruction: getWebSearchCitationInstructions(),
-        },
-      ];
-
-      return formattedResults;
-    } catch (error) {
-      logError(`Error processing web search query ${query}:`, error);
-      return { error: `Web search failed: ${error}` };
+  for (const source of sources) {
+    // Use path as the unique key, falling back to title if path is not available
+    const key = source.path || source.title;
+    const existing = uniqueSources.get(key);
+    if (!existing || source.score > existing.score) {
+      uniqueSources.set(key, source);
     }
-  },
-});
+  }
 
-export { createLexicalSearchTool, createLocalSearchTool, webSearchTool };
+  return Array.from(uniqueSources.values()).sort((a, b) => b.score - a.score);
+}

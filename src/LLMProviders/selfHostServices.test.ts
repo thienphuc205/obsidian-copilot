@@ -40,6 +40,21 @@ function providerSettings(provider: string, overrides: Record<string, string> = 
   };
 }
 
+/** Auto-mode settings: only the listed providers carry a credential. */
+function autoProviderSettings(keys: {
+  firecrawl?: string;
+  parallel?: string;
+  exa?: string;
+  perplexity?: string;
+}) {
+  return providerSettings("auto", {
+    firecrawlApiKey: keys.firecrawl ?? "",
+    parallelApiKey: keys.parallel ?? "",
+    exaApiKey: keys.exa ?? "",
+    perplexityApiKey: keys.perplexity ?? "",
+  });
+}
+
 function mockJsonResponse(json: unknown): void {
   mockFetch.mockResolvedValueOnce({
     ok: true,
@@ -149,6 +164,16 @@ describe("selfHostServices", () => {
 
     it("defaults to the Firecrawl credential for an unknown provider", () => {
       mockGetSettings.mockReturnValue(providerSettings("unknown", { firecrawlApiKey: "fc-key" }));
+
+      expect(hasSelfHostSearchKey()).toBe(true);
+    });
+
+    it("accepts any single provider credential when auto is selected", () => {
+      mockGetSettings.mockReturnValue(autoProviderSettings({}));
+
+      expect(hasSelfHostSearchKey()).toBe(false);
+
+      mockGetSettings.mockReturnValue(autoProviderSettings({ exa: "exa-key" }));
 
       expect(hasSelfHostSearchKey()).toBe(true);
     });
@@ -903,6 +928,187 @@ describe("selfHostServices", () => {
           "https://api.firecrawl.dev/v2/search",
           expect.any(Object)
         );
+      });
+    });
+
+    describe("Auto merge", () => {
+      it("interleaves configured providers round-robin and dedupes by URL (https://github.com/Brevilabs/obsidian-copilot-private/issues/285)", async () => {
+        mockGetSettings.mockReturnValue(
+          autoProviderSettings({ firecrawl: "fc-key", exa: "exa-key" })
+        );
+        mockJsonResponse({
+          data: {
+            web: [
+              { title: "FC One", description: "fc one", url: "https://a.com/one" },
+              { title: "FC Two", description: "fc two", url: "https://shared.com/x" },
+            ],
+          },
+        });
+        mockJsonResponse({
+          results: [
+            { title: "Exa One", url: "https://b.com/one", highlights: ["exa one"] },
+            { title: "Exa Dup", url: "https://a.com/one/", highlights: ["dup row"] },
+          ],
+        });
+
+        const result = await selfHostWebSearch("query");
+
+        expect(result.citations).toEqual([
+          "https://a.com/one",
+          "https://b.com/one",
+          "https://shared.com/x",
+        ]);
+        expect(result.content).toContain("### FC One");
+        expect(result.content).toContain("### Exa One");
+        expect(result.content).toContain("### FC Two");
+        expect(result.content).not.toContain("### Exa Dup");
+      });
+
+      it("keeps the longest snippet when several providers return the same URL (https://github.com/Brevilabs/obsidian-copilot-private/issues/285)", async () => {
+        mockGetSettings.mockReturnValue(
+          autoProviderSettings({ firecrawl: "fc-key", exa: "exa-key" })
+        );
+        mockJsonResponse({
+          data: { web: [{ title: "Short", description: "short", url: "https://same.com/page" }] },
+        });
+        mockJsonResponse({
+          results: [
+            {
+              title: "Long",
+              url: "https://same.com/page",
+              highlights: ["a much longer snippet contributed by Exa"],
+            },
+          ],
+        });
+
+        const result = await selfHostWebSearch("query");
+
+        expect(result.citations).toEqual(["https://same.com/page"]);
+        expect(result.content).toContain("a much longer snippet contributed by Exa");
+        expect(result.content).not.toContain("### Long");
+      });
+
+      it("caps merged results at the per-provider maximum (https://github.com/Brevilabs/obsidian-copilot-private/issues/285)", async () => {
+        mockGetSettings.mockReturnValue(
+          autoProviderSettings({ firecrawl: "fc-key", exa: "exa-key" })
+        );
+        mockJsonResponse({
+          data: {
+            web: [0, 1, 2, 3, 4].map((i) => ({
+              title: `FC ${i}`,
+              description: `d${i}`,
+              url: `https://fc.com/${i}`,
+            })),
+          },
+        });
+        mockJsonResponse({
+          results: [0, 1, 2, 3, 4].map((i) => ({
+            title: `Exa ${i}`,
+            url: `https://exa.com/${i}`,
+            highlights: [`h${i}`],
+          })),
+        });
+
+        const result = await selfHostWebSearch("query");
+
+        expect(result.citations).toEqual([
+          "https://fc.com/0",
+          "https://exa.com/0",
+          "https://fc.com/1",
+          "https://exa.com/1",
+          "https://fc.com/2",
+        ]);
+      });
+
+      it("skips providers without a configured key (https://github.com/Brevilabs/obsidian-copilot-private/issues/285)", async () => {
+        mockGetSettings.mockReturnValue(
+          autoProviderSettings({ firecrawl: "fc-key", parallel: "par-key" })
+        );
+        mockJsonResponse({
+          data: { web: [{ title: "FC", description: "", url: "https://fc.com" }] },
+        });
+        mockJsonResponse({
+          results: [{ title: "Parallel", url: "https://par.com", excerpts: ["p"] }],
+        });
+
+        const result = await selfHostWebSearch("query");
+
+        expect(result.citations).toEqual(["https://fc.com", "https://par.com"]);
+        expect(mockFetch.mock.calls.map((call) => call[0] as string)).toEqual([
+          "https://api.firecrawl.dev/v2/search",
+          "https://api.parallel.ai/v1/search",
+        ]);
+      });
+
+      it("fails with an actionable error when no provider key is configured (https://github.com/Brevilabs/obsidian-copilot-private/issues/285)", async () => {
+        mockGetSettings.mockReturnValue(autoProviderSettings({}));
+
+        await expect(selfHostWebSearch("query")).rejects.toThrow(
+          "Auto search needs at least one provider API key (Firecrawl, Parallel, Exa, or Perplexity)."
+        );
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+
+      it("refuses Perplexity as the only configured provider (https://github.com/Brevilabs/obsidian-copilot-private/issues/285)", async () => {
+        mockGetSettings.mockReturnValue(autoProviderSettings({ perplexity: "pplx-key" }));
+
+        await expect(selfHostWebSearch("query")).rejects.toThrow(
+          "Auto needs a results provider; Perplexity only synthesizes an answer."
+        );
+      });
+
+      it("fails with a combined error when every configured provider fails (https://github.com/Brevilabs/obsidian-copilot-private/issues/285)", async () => {
+        mockGetSettings.mockReturnValue(
+          autoProviderSettings({ firecrawl: "fc-key", exa: "exa-key" })
+        );
+        mockFetch.mockResolvedValue({
+          ok: false,
+          status: 401,
+          text: async () => "unauthorized",
+        });
+
+        await expect(selfHostWebSearch("query")).rejects.toThrow(
+          "Auto search failed on every configured provider. firecrawl: Firecrawl search failed (401): unauthorized | exa: Exa search failed (401): unauthorized"
+        );
+      });
+
+      it("keeps merging when a single provider fails (https://github.com/Brevilabs/obsidian-copilot-private/issues/285)", async () => {
+        mockGetSettings.mockReturnValue(
+          autoProviderSettings({ firecrawl: "fc-key", exa: "exa-key" })
+        );
+        mockFetch
+          .mockResolvedValueOnce({ ok: false, status: 500, text: async () => "boom" })
+          .mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({
+              results: [{ title: "Exa", url: "https://exa.com", highlights: ["e"] }],
+            }),
+          });
+
+        const result = await selfHostWebSearch("query");
+
+        expect(result.citations).toEqual(["https://exa.com"]);
+      });
+
+      it("turns Perplexity citations into url-only rows and drops its prose answer (https://github.com/Brevilabs/obsidian-copilot-private/issues/285)", async () => {
+        mockGetSettings.mockReturnValue(
+          autoProviderSettings({ firecrawl: "fc-key", perplexity: "pplx-key" })
+        );
+        mockJsonResponse({
+          data: { web: [{ title: "FC", description: "fc desc", url: "https://fc.com/a" }] },
+        });
+        mockJsonResponse({
+          choices: [{ message: { content: "Synthesized prose answer" } }],
+          citations: ["https://pplx-source.com/one"],
+        });
+
+        const result = await selfHostWebSearch("query");
+
+        expect(result.citations).toEqual(["https://fc.com/a", "https://pplx-source.com/one"]);
+        expect(result.content).toContain(
+          "### pplx-source.com\nSource: https://pplx-source.com/one"
+        );
+        expect(result.content).not.toContain("Synthesized prose answer");
       });
     });
   });

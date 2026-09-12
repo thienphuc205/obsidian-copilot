@@ -119,8 +119,8 @@ function trimUrlTrailingPunctuation(url: string): string {
  * "example.com" is structurally indistinguishable from those, requiring an
  * explicit http(s):// scheme is the only robust lever against false positives
  * when a whole document is pasted. Trailing prose punctuation is trimmed and the
- * result de-duplicated. This is the canonical extractor — `Mention.extractUrls`
- * (the @-mention pipeline) and {@link parseUrlsFromText} both route through it.
+ * result de-duplicated. This is the canonical extractor — {@link parseUrlsFromText}
+ * routes through it.
  */
 export function extractUrlsFromText(text: string): string[] {
   // Stop the match at whitespace, quotes, angle brackets, and CJK/full-width

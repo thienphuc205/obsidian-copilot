@@ -1,6 +1,6 @@
 import * as contextMenuModule from "@/commands/contextMenu";
 import { registerContextMenu } from "@/commands/contextMenu";
-import { COMMAND_IDS, COMMAND_NAMES } from "@/constants";
+import { COMMAND_IDS } from "@/constants";
 import { isDesktopRuntime } from "@/utils/desktopRuntime";
 import type { App, Menu } from "obsidian";
 
@@ -82,21 +82,6 @@ describe("contextMenu", () => {
   });
 
   describe("registerContextMenu()", () => {
-    it("omits publishing from the editor context submenu", () => {
-      const menu = new TestMenu();
-      const app = {
-        commands: { executeCommandById: jest.fn() },
-        workspace: { getActiveFile: jest.fn(() => null) },
-      } as unknown as App;
-
-      registerContextMenu(menu as unknown as Menu, app);
-
-      const copilotMenu = findItem(menu, "Copilot")?.submenu;
-      expect(
-        findItem(copilotMenu!, COMMAND_NAMES[COMMAND_IDS.PUBLISH_FILE_TO_OPENARTIFACTS])
-      ).toBeUndefined();
-    });
-
     it("does not expose a file-menu publishing registration", () => {
       expect(contextMenuModule).not.toHaveProperty("registerOpenArtifactsFileMenu");
     });

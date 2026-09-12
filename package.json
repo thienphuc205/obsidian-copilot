@@ -37,7 +37,6 @@
     "test:pdf-assets": "node scripts/build-pdf-assets.test.mjs",
     "test:pdf-manual": "node scripts/build-pdf-manual-archive.test.mjs",
     "prepare": "husky",
-    "prompt:debug": "node scripts/printPromptDebug.js",
     "test:vault": "bash scripts/test-vault.sh",
     "test:vault:script": "bash scripts/test-vault.test.sh",
     "test:gallery-vault:script": "bash scripts/gallery-vault.test.sh",

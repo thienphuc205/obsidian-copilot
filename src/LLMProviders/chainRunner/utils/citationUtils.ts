@@ -1,168 +1,10 @@
 /**
- * Citation utilities for consistent citation behavior across the application.
- * Handles citation rules, content sanitization, and source formatting.
+ * Citation utilities for inline citation processing.
+ * Handles the conversion of footnote-style citations into a renderable
+ * Sources section used by the chat UI.
  */
-
-// ===== CITATION RULES =====
-
-const CITATION_RULES = `CITATION RULES:
-1. START with [^1] and increment sequentially ([^1], [^2], [^3], etc.) with NO gaps
-2. BE SELECTIVE: ONLY cite when introducing NEW factual claims, specific data, or direct quotes from sources
-3. IMPORTANT: Do NOT cite every sentence or bullet point. This creates clutter and poor readability.
-4. DO NOT cite for:
-   - General knowledge or common facts
-   - Your own analysis or synthesis
-   - Transitional or concluding statements
-   - Every single sentence (AVOID CITATION CLUTTER - aim for 1-3 citations per paragraph maximum)
-5. Citations are for SOURCE ATTRIBUTION, not for proving every statement
-6. GOOD: One citation per key concept. BAD: Citation after every sentence.
-7. Place citations immediately after the specific claim: "The study found X [^1]" not "The study found X. [^1]"
-8. Do not reuse any bracketed numbers that appear inside the source content itself
-9. If multiple source chunks come from the same document, cite each relevant chunk separately (e.g., [^1] and [^2] can both be from the same document title)
-10. End with '#### Sources' section containing: [^n]: [[Title]] (one per line, matching citation order)`;
-
-const WEB_CITATION_RULES = `WEB CITATION RULES:
-1. START with [^1] and increment sequentially ([^1], [^2], [^3], etc.) with NO gaps
-2. Cite ONLY when introducing new factual claims, statistics, or direct quotes from the search results
-3. After every cited claim, place the corresponding footnote immediately after the sentence ("The study found X [^1]")
-4. End with '#### Sources' and provide definitions EXACTLY in this format: [^n]: [Short Title](URL)
-
-IMPORTANT: Each source definition must follow this exact pattern:
-- Start with [^n]: (where n is the citation number)
-- Follow with [Title](URL) where Title is SHORT (2-5 words) and wrapped in square brackets
-- Example: [^1]: [Paul Graham Essay](https://paulgraham.com/wealth.html)
-- DO NOT write long descriptions - keep titles concise`;
-
-// ===== INSTRUCTION GENERATORS =====
-
-/**
- * Generates comprehensive guidance for local search results including citation rules,
- * image inclusion instructions, and source catalog.
- */
-export function getLocalSearchGuidance(
-  sourceCatalog: string[],
-  enableInlineCitations: boolean = true
-): string {
-  if (!enableInlineCitations) {
-    return `
-
-<guidance>
-IMAGE INCLUSION:
-When the retrieved documents contain relevant images (in formats like ![alt](image.png) or ![[image.png]]), include them in your response at appropriate locations using their exact original markdown format from the source.
-
-Source Catalog (for reference only):
-${sourceCatalog.join("\n")}
-</guidance>`;
-  }
-
-  return `
-
-<guidance>
-${CITATION_RULES}
-
-IMAGE INCLUSION:
-When the retrieved documents contain relevant images (in formats like ![alt](image.png) or ![[image.png]]), include them in your response at appropriate locations using their exact original markdown format from the source.
-
-Source Catalog (for reference only):
-${sourceCatalog.join("\n")}
-</guidance>`;
-}
-
-/**
- * Short citation format reminder placed near the user query for better model compliance.
- * Reinforces key formatting from CITATION_RULES without duplicating the full ruleset.
- */
-export function getCitationFormatReminder(enableInlineCitations: boolean): string | null {
-  if (!enableInlineCitations) return null;
-  return "REMINDER: End your response with an '#### Sources' section listing each cited source as [^n]: [[Title]], numbered sequentially from [^1].";
-}
-
-// ===== CONSTANTS =====
-
-const MAX_FALLBACK_SOURCES = 20;
-
-// ===== CENTRALIZED CITATION CONTROL =====
-
-/**
- * Adds fallback sources to response if citations are missing.
- */
-export function addFallbackSources(
-  response: string | null | undefined,
-  sources: { title?: string; path?: string }[],
-  enableInlineCitations: boolean = true
-): string {
-  // If inline citations are disabled, don't add fallback sources
-  if (!enableInlineCitations) {
-    return response || "";
-  }
-
-  // Input validation
-  if (!sources?.length || !response) {
-    return response || "";
-  }
-
-  if (hasExistingCitations(response)) {
-    return response;
-  }
-
-  // Add simple sources section as fallback
-  const sourcesList = sources
-    .slice(0, MAX_FALLBACK_SOURCES)
-    .map((s, i) => {
-      const title = (s.title || s.path || "Untitled").replace(/^\[\[|\]\]$/g, ""); // Strip existing wiki link brackets
-      return `[^${i + 1}]: [[${title}]]`;
-    })
-    .join("\n");
-
-  return `${response}\n\n#### Sources:\n\n${sourcesList}`;
-}
-
-// ===== CONTENT PROCESSING =====
-
-/**
- * Sanitizes content to remove pre-existing citation markers to prevent number leakage.
- */
-export function sanitizeContentForCitations(text: string | null | undefined): string {
-  if (!text) return "";
-
-  // Remove inline footnote refs like [^12]
-  let out = text.replace(/\[\^\d+\]/g, "");
-
-  // Remove numeric citations like [1] or [1, 2] that are not markdown links or wiki links
-  out = out.replace(/\[(\d+(?:\s*,\s*\d+)*)\](?!\()/g, "");
-
-  // Remove footnote definition lines like [^1]: something
-  out = out.replace(/^\s*\[\^\d+\]:.*$/gm, "");
-
-  return out;
-}
-
-/**
- * Detects if response already has sources section or footnote definitions.
- */
-export function hasExistingCitations(response: string | null | undefined): boolean {
-  const content = response || "";
-  const hasMarkdownHeading = /(^|\n)\s*#{1,6}\s*Sources\b/i.test(content);
-  const hasPlainLabel = /(^|\n)\s*Sources\s*(?:[:-]\s*)?(\n|$)/i.test(content);
-  const hasSummaryTag = /<summary[^>]*>\s*Sources\s*<\/summary>/i.test(content);
-  // More robust detection: look for ANY line starting with [^digits]:
-  const hasFootnoteDefinitions = /(^|\n)\s*\[\^\d+\]:\s*/.test(content);
-  return hasMarkdownHeading || hasPlainLabel || hasSummaryTag || hasFootnoteDefinitions;
-}
-
-/**
- * Provides web-search-specific citation instructions using markdown links.
- */
-export function getWebSearchCitationInstructions(enableInlineCitations: boolean = true): string {
-  if (!enableInlineCitations) {
-    return "";
-  }
-
-  return `\n\n${WEB_CITATION_RULES}`;
-}
 
 // ===== CITATION PROCESSING UTILITIES =====
-// Deprecated: legacy citation parsing is awaiting removal; retained for existing callers.
 
 interface SourcesSection {
   mainContent: string;
@@ -176,7 +18,7 @@ interface SourcesSection {
  *   2. Horizontal rule separator (---) followed by footnote definitions
  *   3. Trailing block of bare footnote definitions with no separator
  */
-export function extractSourcesSection(content: string): SourcesSection | null {
+function extractSourcesSection(content: string): SourcesSection | null {
   // Strategy 1: Explicit "Sources" heading (original behavior)
   const sourcesRegex = /([\s\S]*?)\n+(?:####\s*)?Sources\s*:?\s*\n+([\s\S]*)$/i;
   const match = content.match(sourcesRegex);
@@ -415,7 +257,7 @@ function consolidateDuplicateSources(items: string[]): {
  * Updates citations in content to reflect consolidated numbering.
  * Deduplicates within each bracket group after remapping.
  */
-export function updateCitationsForConsolidation(
+function updateCitationsForConsolidation(
   content: string,
   consolidationMap: Map<number, number>
 ): string {
@@ -442,7 +284,7 @@ export function updateCitationsForConsolidation(
  * connectors like " and " or ", " ([1] and [1]).
  * Only collapses when the second bracket is a subset of the first.
  */
-export function deduplicateAdjacentCitations(content: string): string {
+function deduplicateAdjacentCitations(content: string): string {
   let result = content;
   let prev;
   do {
@@ -616,22 +458,4 @@ export function processInlineCitations(
     .filter(isNonNull);
 
   return buildSourcesDetails(mainContent, detailedItems);
-}
-
-// ===== SOURCE CATALOG UTILITIES =====
-
-export interface SourceCatalogEntry {
-  title: string;
-  path: string;
-}
-
-/**
- * Formats source catalog entries for citation guidance.
- */
-export function formatSourceCatalog(sources: SourceCatalogEntry[]): string[] {
-  return sources.map((source) => {
-    const title = source.title || source.path || "Untitled";
-    const path = source.path || title;
-    return `- [[${title}]] (${path})`;
-  });
 }

@@ -259,19 +259,50 @@ interface FirecrawlSearchResult {
 type SearchSnippetField = "excerpts" | "highlights";
 
 /**
- * Normalize ranked provider results without treating missing or malformed URLs
- * as citations. https://github.com/Brevilabs/obsidian-copilot-private/issues/285
+ * One provider result row with provenance. Auto mode merges these across
+ * providers; single-provider mode renders them straight into the channel's
+ * `{ content, citations }` shape, which stays unchanged on the wire.
  */
-function normalizeProviderResults(
-  rawResults: unknown,
-  snippetField: SearchSnippetField
-): SelfHostWebSearchResult {
-  if (!Array.isArray(rawResults)) {
-    return { content: "", citations: [] };
-  }
+interface SelfHostSearchResultItem {
+  title: string;
+  url: string;
+  snippet: string;
+  provider: string;
+}
 
+/** Render result rows into the channel's `{ content, citations }` response shape. */
+function renderResultItems(items: SelfHostSearchResultItem[]): SelfHostWebSearchResult {
   const contentParts: string[] = [];
   const citations: string[] = [];
+
+  for (const item of items) {
+    const content = [`### ${item.title}`, item.snippet, item.url ? `Source: ${item.url}` : ""]
+      .filter(Boolean)
+      .join("\n");
+
+    contentParts.push(content);
+    if (item.url) {
+      citations.push(item.url);
+    }
+  }
+
+  return { content: contentParts.join("\n\n"), citations };
+}
+
+/**
+ * Normalize ranked provider results into rows without treating missing or
+ * malformed URLs as citations. https://github.com/Brevilabs/obsidian-copilot-private/issues/285
+ */
+function normalizeProviderResultItems(
+  rawResults: unknown,
+  snippetField: SearchSnippetField,
+  provider: string
+): SelfHostSearchResultItem[] {
+  if (!Array.isArray(rawResults)) {
+    return [];
+  }
+
+  const items: SelfHostSearchResultItem[] = [];
 
   for (const item of rawResults) {
     if (!item || typeof item !== "object" || Array.isArray(item)) {
@@ -287,17 +318,11 @@ function normalizeProviderResults(
           (snippet): snippet is string => typeof snippet === "string" && snippet.trim().length > 0
         )
       : [];
-    const content = [`### ${title}`, snippets.join("\n"), url ? `Source: ${url}` : ""]
-      .filter(Boolean)
-      .join("\n");
 
-    contentParts.push(content);
-    if (url) {
-      citations.push(url);
-    }
+    items.push({ title, url, snippet: snippets.join("\n"), provider });
   }
 
-  return { content: contentParts.join("\n\n"), citations };
+  return items;
 }
 
 /**
@@ -306,6 +331,14 @@ function normalizeProviderResults(
 export function hasSelfHostSearchKey(): boolean {
   const settings = getSettings();
   switch (settings.selfHostSearchProvider) {
+    // Auto merges every configured provider, so any one credential suffices.
+    case "auto":
+      return (
+        !!settings.firecrawlApiKey ||
+        !!settings.parallelApiKey ||
+        !!settings.exaApiKey ||
+        !!settings.perplexityApiKey
+      );
     // Each self-host provider reads only its own credential.
     // https://github.com/Brevilabs/obsidian-copilot-private/issues/285
     case "parallel":
@@ -333,7 +366,10 @@ export function hasSelfHostYoutubeKey(): boolean {
  * Web search via Firecrawl direct API (self-host mode).
  * Handles both v2 `data.web` format and older flat `data` array.
  */
-async function firecrawlSearch(query: string, apiKey: string): Promise<SelfHostWebSearchResult> {
+async function firecrawlSearchRows(
+  query: string,
+  apiKey: string
+): Promise<SelfHostSearchResultItem[]> {
   const startTime = Date.now();
 
   const response = await safeFetchNoThrow(FIRECRAWL_SEARCH_URL, {
@@ -362,28 +398,18 @@ async function firecrawlSearch(query: string, apiKey: string): Promise<SelfHostW
       ? rawData.web
       : [];
 
-  const contentParts: string[] = [];
-  const citations: string[] = [];
-
-  for (const item of results) {
-    const title = item.title || "Untitled";
-    const description = item.description || "";
-    const url = item.url || "";
-    contentParts.push(`### ${title}\n${description}\nSource: ${url}`);
-    if (url) {
-      citations.push(url);
-    }
-  }
-
   const elapsed = Date.now() - startTime;
   logInfo(`[selfHostWebSearch] Firecrawl: ${results.length} results in ${elapsed}ms`);
 
-  return { content: contentParts.join("\n\n"), citations };
+  return results.map((item) => ({
+    title: item.title || "Untitled",
+    url: item.url || "",
+    snippet: item.description || "",
+    provider: "firecrawl",
+  }));
 }
 
-/**
- * Web search via Perplexity Sonar API (self-host mode).
- */
+/** Web search via Perplexity Sonar API (self-host mode). */
 async function perplexitySonarSearch(
   query: string,
   apiKey: string
@@ -416,7 +442,10 @@ async function perplexitySonarSearch(
 }
 
 /** Web search via Parallel's GA Search API (self-host mode). */
-async function parallelSearch(query: string, apiKey: string): Promise<SelfHostWebSearchResult> {
+async function parallelSearchRows(
+  query: string,
+  apiKey: string
+): Promise<SelfHostSearchResultItem[]> {
   // Parallel rejects requests above these per-field limits, so bound them only
   // at its API boundary. https://github.com/Brevilabs/obsidian-copilot-private/issues/285
   const response = await safeFetchNoThrow(PARALLEL_SEARCH_URL, {
@@ -437,11 +466,11 @@ async function parallelSearch(query: string, apiKey: string): Promise<SelfHostWe
   }
 
   const json = (await response.json()) as { results?: unknown };
-  return normalizeProviderResults(json?.results, "excerpts");
+  return normalizeProviderResultItems(json?.results, "excerpts", "parallel");
 }
 
 /** Web search via Exa's Search API (self-host mode). */
-async function exaSearch(query: string, apiKey: string): Promise<SelfHostWebSearchResult> {
+async function exaSearchRows(query: string, apiKey: string): Promise<SelfHostSearchResultItem[]> {
   const response = await safeFetchNoThrow(EXA_SEARCH_URL, {
     method: "POST",
     headers: {
@@ -461,7 +490,169 @@ async function exaSearch(query: string, apiKey: string): Promise<SelfHostWebSear
   }
 
   const json = (await response.json()) as { results?: unknown };
-  return normalizeProviderResults(json?.results, "highlights");
+  return normalizeProviderResultItems(json?.results, "highlights", "exa");
+}
+
+/** Single-provider cap auto merging matches: Firecrawl's `limit: 5`. */
+const AUTO_MERGE_MAX_RESULTS = 5;
+
+/**
+ * Provider registry for auto mode: one entry per mergeable provider, paired
+ * with the settings field holding its credential. Perplexity is normalized to
+ * citation rows up front so every entry yields the same row shape.
+ */
+const AUTO_SEARCH_PROVIDERS: {
+  name: "firecrawl" | "parallel" | "exa" | "perplexity";
+  keyField: "firecrawlApiKey" | "parallelApiKey" | "exaApiKey" | "perplexityApiKey";
+  search: (query: string, apiKey: string) => Promise<SelfHostSearchResultItem[]>;
+}[] = [
+  { name: "firecrawl", keyField: "firecrawlApiKey", search: firecrawlSearchRows },
+  { name: "exa", keyField: "exaApiKey", search: exaSearchRows },
+  {
+    name: "perplexity",
+    keyField: "perplexityApiKey",
+    search: async (query, apiKey) =>
+      perplexityResultItems(await perplexitySonarSearch(query, apiKey)),
+  },
+  { name: "parallel", keyField: "parallelApiKey", search: parallelSearchRows },
+];
+
+/** Strip query/hash and trailing slash so the same page from two providers dedupes. */
+function normalizeUrlForDedupe(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    parsed.search = "";
+    return `${parsed.origin}${parsed.pathname.replace(/\/+$/, "")}`.toLowerCase();
+  } catch {
+    return url.trim().toLowerCase();
+  }
+}
+
+/** Human-readable label for a citation URL (its host, or the index fallback). */
+function citationTitle(url: string, index: number): string {
+  try {
+    return new URL(url).hostname || `Citation ${index + 1}`;
+  } catch {
+    return `Citation ${index + 1}`;
+  }
+}
+
+/**
+ * Query every provider that has a credential in parallel and merge their
+ * results: URLs are deduped (longest snippet wins), rows interleave
+ * round-robin so no single provider dominates, and a per-provider failure
+ * never sinks the merge. https://github.com/Brevilabs/obsidian-copilot-private/issues/285
+ */
+async function autoMergeSearch(query: string): Promise<SelfHostWebSearchResult> {
+  const settings = getSettings();
+  const withKeys = AUTO_SEARCH_PROVIDERS.filter((p) => !!settings[p.keyField]);
+  const hasOnlyPerplexity = withKeys.length === 1 && withKeys[0].name === "perplexity";
+
+  if (withKeys.length === 0) {
+    throw new Error(
+      "Auto search needs at least one provider API key (Firecrawl, Parallel, Exa, or Perplexity)."
+    );
+  }
+  // Perplexity synthesizes an answer instead of ranked sources, so its
+  // citations alone would starve auto of real result rows.
+  if (hasOnlyPerplexity) {
+    throw new Error("Auto needs a results provider; Perplexity only synthesizes an answer.");
+  }
+
+  const settled = await Promise.allSettled(
+    withKeys.map((p) => p.search(query, settings[p.keyField]))
+  );
+
+  const rowsByProvider = new Map<string, SelfHostSearchResultItem[]>();
+  const failures: string[] = [];
+
+  for (let i = 0; i < withKeys.length; i++) {
+    const outcome = settled[i];
+    const name = withKeys[i].name;
+
+    if (outcome.status !== "fulfilled") {
+      const reason =
+        outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+      logError(`[selfHostWebSearch] auto: ${name} failed: ${reason}`);
+      failures.push(`${name}: ${reason}`);
+      continue;
+    }
+
+    // Perplexity is already normalized to citation rows by the registry.
+    rowsByProvider.set(name, outcome.value);
+  }
+
+  if (rowsByProvider.size === 0) {
+    throw new Error(`Auto search failed on every configured provider. ${failures.join(" | ")}`);
+  }
+
+  // Interleave in registry order (firecrawl, exa, perplexity, parallel) so
+  // early slots mix providers, then cap to the count a single-provider search
+  // returns today.
+  const providerRows = AUTO_SEARCH_PROVIDERS.filter((p) => rowsByProvider.has(p.name)).map(
+    (p) => rowsByProvider.get(p.name)!
+  );
+
+  const cursors: number[] = new Array(providerRows.length).fill(0);
+  const merged: SelfHostSearchResultItem[] = [];
+  // Dedupe key -> merged index; duplicate URLs keep the longest snippet.
+  const seenUrls = new Map<string, { index: number; snippet: string }>();
+
+  let exhausted = false;
+  while (!exhausted && merged.length < AUTO_MERGE_MAX_RESULTS) {
+    exhausted = true;
+    for (let i = 0; i < providerRows.length; i++) {
+      const rows = providerRows[i];
+      // Advance past deduped/exhausted rows to this provider's next fresh one.
+      while (cursors[i] < rows.length && merged.length < AUTO_MERGE_MAX_RESULTS) {
+        const row = rows[cursors[i]];
+        cursors[i] += 1;
+
+        // Uncited rows carry no source to dedupe or attribute, so skip them.
+        if (!row.url) {
+          continue;
+        }
+        const key = normalizeUrlForDedupe(row.url);
+        const existing = seenUrls.get(key);
+        if (existing !== undefined) {
+          // Same page from another provider: keep the first row's identity,
+          // swap in the richer snippet.
+          if (row.snippet.length > existing.snippet.length) {
+            merged[existing.index].snippet = row.snippet;
+            existing.snippet = row.snippet;
+          }
+          continue;
+        }
+        seenUrls.set(key, { index: merged.length, snippet: row.snippet });
+        merged.push(row);
+        break;
+      }
+      if (cursors[i] < rows.length) {
+        exhausted = false;
+      }
+    }
+  }
+
+  const summary = AUTO_SEARCH_PROVIDERS.map(
+    (p) => `${p.name}=${rowsByProvider.get(p.name)?.length ?? 0}`
+  ).join(", ");
+  logInfo(`[selfHostWebSearch] auto: ${summary} -> ${merged.length} merged results`);
+
+  return {
+    content: renderResultItems(merged).content,
+    citations: merged.filter((r) => r.url).map((r) => r.url),
+  };
+}
+
+/** Map Perplexity's synthesized answer to url-only rows (its prose is not a source). */
+function perplexityResultItems(result: SelfHostWebSearchResult): SelfHostSearchResultItem[] {
+  return result.citations.map((url, index) => ({
+    title: citationTitle(url, index),
+    url,
+    snippet: "",
+    provider: "perplexity",
+  }));
 }
 
 /**
@@ -471,17 +662,19 @@ async function exaSearch(query: string, apiKey: string): Promise<SelfHostWebSear
 export async function selfHostWebSearch(query: string): Promise<SelfHostWebSearchResult> {
   const settings = getSettings();
   switch (settings.selfHostSearchProvider) {
+    case "auto":
+      return autoMergeSearch(query);
     // Direct dispatch keeps hosted search unchanged and prevents credentials
     // crossing provider boundaries. https://github.com/Brevilabs/obsidian-copilot-private/issues/285
     case "parallel":
-      return parallelSearch(query, settings.parallelApiKey);
+      return renderResultItems(await parallelSearchRows(query, settings.parallelApiKey));
     case "exa":
-      return exaSearch(query, settings.exaApiKey);
+      return renderResultItems(await exaSearchRows(query, settings.exaApiKey));
     case "perplexity":
       return perplexitySonarSearch(query, settings.perplexityApiKey);
     case "firecrawl":
     default:
-      return firecrawlSearch(query, settings.firecrawlApiKey);
+      return renderResultItems(await firecrawlSearchRows(query, settings.firecrawlApiKey));
   }
 }
 

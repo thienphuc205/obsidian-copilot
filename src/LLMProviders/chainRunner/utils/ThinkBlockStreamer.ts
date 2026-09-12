@@ -1,14 +1,12 @@
 import { StreamingResult, TokenUsage } from "@/types/message";
 import { detectTruncation, extractTokenUsage } from "./finishReasonDetector";
 import { formatErrorChunk } from "@/utils/toolResultUtils";
-import { NativeToolCall, ToolCallChunk, buildToolCallsFromChunks } from "./nativeToolCalling";
 import { logInfo, logWarn } from "@/logger";
 import { stripSpecialTokens } from "@/utils/stripSpecialTokens";
 
 /**
  * ThinkBlockStreamer handles streaming content from various LLM providers
  * that support thinking/reasoning modes (like Claude and Deepseek).
- * Also accumulates native tool calls from tool_call_chunks during streaming.
  * Also detects truncation due to token limits across all providers.
  */
 export class ThinkBlockStreamer {
@@ -22,9 +20,6 @@ export class ThinkBlockStreamer {
   // Character index where an excluded text-level think block started.
   // -1 means we're not currently inside an excluded block.
   private excludedThinkBlockStart = -1;
-
-  // Native tool call accumulation
-  private toolCallChunks: Map<number, ToolCallChunk> = new Map();
 
   constructor(
     private updateCurrentAiMessage: (message: string) => void,
@@ -231,41 +226,9 @@ export class ThinkBlockStreamer {
     return false; // No thinking handled
   }
 
-  /**
-   * Accumulate native tool call chunks during streaming.
-   * LangChain providers send tool_call_chunks with incremental data.
-   */
-  private handleToolCallChunks(chunk: {
-    tool_call_chunks?: Array<{
-      index?: number;
-      id?: string;
-      name?: string;
-      args?: string;
-    }>;
-  }) {
-    // Check for tool_call_chunks in the chunk (LangChain streaming format)
-    const toolCallChunks = chunk.tool_call_chunks;
-    if (!toolCallChunks || !Array.isArray(toolCallChunks)) {
-      return;
-    }
-
-    for (const tc of toolCallChunks) {
-      const idx: number = (tc.index as number) ?? 0;
-      const existing = this.toolCallChunks.get(idx) || { name: "", args: "" };
-
-      // Accumulate data from chunk
-      if (tc.id) existing.id = tc.id;
-      if (tc.name) existing.name += tc.name;
-      if (tc.args) existing.args += tc.args;
-
-      this.toolCallChunks.set(idx, existing);
-    }
-  }
-
   processChunk(chunk: {
     response_metadata?: Record<string, unknown>;
     usage_metadata?: { input_tokens?: number; output_tokens?: number; total_tokens?: number };
-    tool_call_chunks?: Array<{ index?: number; id?: string; name?: string; args?: string }>;
     content?: string | Array<{ type?: string; text?: string; thinking?: string }>;
     additional_kwargs?: {
       reasoning_content?: string;
@@ -284,9 +247,6 @@ export class ThinkBlockStreamer {
     if (usage) {
       this.tokenUsage = usage;
     }
-
-    // Handle native tool call chunks (LangChain streaming)
-    this.handleToolCallChunks(chunk);
 
     // Determine if this chunk will handle thinking content
     // Note: For OpenRouter, we process only delta.reasoning, but we still need to recognize
@@ -330,14 +290,6 @@ export class ThinkBlockStreamer {
 
   processErrorChunk(errorMessage: string) {
     this.errorResponse = formatErrorChunk(errorMessage);
-  }
-
-  /**
-   * Get the accumulated tool calls from streaming chunks.
-   * Call this after streaming is complete to get all tool calls.
-   */
-  getToolCalls(): NativeToolCall[] {
-    return buildToolCallsFromChunks(this.toolCallChunks);
   }
 
   close(): StreamingResult {

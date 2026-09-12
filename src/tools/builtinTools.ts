@@ -14,7 +14,7 @@ import {
   obsidianTasksTool,
   obsidianTemplatesTool,
 } from "./ObsidianCliTools";
-import { createLocalSearchTool, webSearchTool } from "./SearchTools";
+import { createLocalSearchTool } from "./SearchTools";
 import { createGetTagListTool } from "./TagTools";
 import {
   convertTimeBetweenTimezonesTool,
@@ -23,7 +23,6 @@ import {
   getTimeRangeMsTool,
 } from "./TimeTools";
 import { ToolDefinition, ToolRegistry } from "./ToolRegistry";
-import { youtubeTranscriptionTool } from "./YoutubeTools";
 
 /**
  * Define all built-in tools with their metadata. App-dependent tools are
@@ -74,24 +73,6 @@ For time-based searches with meaningful terms (e.g., "python debugging notes fro
 
 For broad searches:
 - If the user wants a comprehensive list, use getFileTree to get all note titles as reference. This helps verify search completeness and identify notes the search may have missed.`,
-      },
-    },
-    {
-      tool: webSearchTool,
-      metadata: {
-        id: "webSearch",
-        displayName: "Web Search",
-        description:
-          "Search the INTERNET (NOT vault notes) when user explicitly asks for web/online information",
-        category: "search",
-        copilotCommands: ["@websearch", "@web"],
-        customPromptInstructions: `For webSearch:
-- ONLY use when the user's query contains explicit web-search intent like:
-  * "web search", "internet search", "online search"
-  * "Google", "search online", "look up online", "search the web"
-- Always provide an empty chatHistory array
-
-Example: "search the web for python tutorials" → query: "python tutorials", chatHistory: []`,
       },
     },
 
@@ -223,21 +204,6 @@ Example: Add "Bob Johnson" to attendees in notes/meeting.md:
 path: "notes/meeting.md"
 oldText: "## Attendees\\n- John Smith\\n- Jane Doe"
 newText: "## Attendees\\n- John Smith\\n- Jane Doe\\n- Bob Johnson"`,
-      },
-    },
-
-    // Media tools
-    {
-      tool: youtubeTranscriptionTool,
-      metadata: {
-        id: "youtubeTranscription",
-        displayName: "YouTube Transcription",
-        description: "Get transcripts from YouTube videos",
-        category: "media",
-        requiresUserMessageContent: true,
-        customPromptInstructions: `For youtubeTranscription:
-- Use when user provides YouTube URLs
-- No parameters needed - the tool will process URLs from the conversation`,
       },
     },
   ];
