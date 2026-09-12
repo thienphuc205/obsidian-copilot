@@ -141,6 +141,28 @@ export function registerCommands(plugin: CopilotPlugin) {
     addCommand(plugin, COMMAND_IDS.NEW_AGENT_CHAT, () => {
       void plugin.newAgentChat();
     });
+    // The floating popup hosts the full Agent Mode chat (the agent UI graph —
+    // subprocess-backed), so it sits under the same desktop gate as the other
+    // agent commands. The dynamic import keeps that graph off the mobile
+    // evaluation path (registering the command on all platforms would evaluate
+    // agent modules on mobile, which is what this block's gate exists to
+    // prevent), mirroring how CLEAR_COPILOT_CACHE defers its node modules.
+    // Host code enters the agent module through the barrel
+    // (`boundaries/dependencies`), the same seam `activateAgentView` uses.
+    addCommand(plugin, COMMAND_IDS.OPEN_FLOATING_AGENT_CHAT, async () => {
+      const { FloatingAgentChatModal } = await import("@/agentMode");
+      const activeFile = plugin.app.workspace.getActiveFile();
+      // "Chat about this note" shares this command as its single entry point
+      // (palette and editor context menu alike): with an active Markdown note
+      // the popup opens with the note preloaded into the prompt. The prompt is
+      // plain text — the agent reads the note itself via its filesystem
+      // access, so no context-pill machinery is involved.
+      const prefillPrompt =
+        activeFile?.extension === "md"
+          ? `Read [[${activeFile.basename}]] and let's discuss it`
+          : undefined;
+      new FloatingAgentChatModal(plugin, { prefillPrompt }).open();
+    });
   }
 
   registerLocalImageCommands(plugin);

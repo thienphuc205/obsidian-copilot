@@ -50,6 +50,57 @@ If your plugin does not need CSS, delete this file.
   display: none;
 }
 
+/* Floating Agent Chat popup. Hosts the same React chat tree as the Agent
+   sidebar view inside a Modal, sized like a launcher popup (fixed comfortable
+   frame). The chat surface draws its own chrome and padding, so the native
+   frame contributes none — same divider logic as .copilot-modal-full-bleed,
+   hence both targets — and the native title stays hidden because the chat
+   owns its own hero/status heading. */
+.modal.copilot-floating-agent-chat-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(40rem, calc(100vw - 2rem));
+  min-width: 0;
+  max-width: calc(100vw - 2rem);
+  height: 70vh;
+  max-height: calc(100vh - 2rem);
+  overflow: hidden;
+}
+
+.modal.copilot-floating-agent-chat-modal,
+.modal.copilot-floating-agent-chat-modal .modal-content {
+  padding: 0;
+}
+
+.modal.copilot-floating-agent-chat-modal .modal-header {
+  margin-bottom: 0;
+}
+
+.modal.copilot-floating-agent-chat-modal .modal-title {
+  display: none;
+}
+
+/* The content column hosts the chat tree. mountPluginViewRoot renders into
+   children[1] of the container it is given: [0] is the inert anchor slot the
+   mount skips, [1] is the host that fills the frame. */
+.modal.copilot-floating-agent-chat-modal .modal-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.modal.copilot-floating-agent-chat-modal .copilot-floating-agent-chat-anchor {
+  display: none;
+}
+
+.modal.copilot-floating-agent-chat-modal .copilot-floating-agent-chat-host {
+  flex: 1;
+  min-height: 0;
+}
+
 /* Single-side dividers. Preflight is off, so `tw-border-b tw-border-solid`
    leaks `border-style: solid` to all sides and renders all four borders. */
 .copilot-divider-b {

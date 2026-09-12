@@ -2,6 +2,7 @@ import { getCommandId, sortCommandsByOrder } from "@/commands/customCommandUtils
 import { getCachedCustomCommands } from "@/commands/state";
 import { COMMAND_IDS } from "@/constants";
 import type { App, Menu } from "obsidian";
+import { isDesktopRuntime } from "@/utils/desktopRuntime";
 import type { CustomCommand } from "./type";
 
 interface CommandManager {
@@ -55,6 +56,23 @@ export function registerContextMenu(menu: Menu, obsidianApp: App): void {
         execute(`copilot:${COMMAND_IDS.TRIGGER_QUICK_COMMAND}`);
       });
     });
+
+    // "Chat about this note" opens the floating agent chat popup with the
+    // active note preloaded into the prompt. It executes the shared command
+    // (same entry point as the palette) so the prefill logic lives in one
+    // place, and is offered only when a Markdown note is active — the prompt
+    // is built from that note. Desktop-gated like the command itself, which
+    // only exists where the Agent Mode runtime does.
+    if (isDesktopRuntime()) {
+      const activeFile = obsidianApp.workspace.getActiveFile();
+      if (activeFile?.extension === "md") {
+        submenu.addItem((subItem) => {
+          subItem.setTitle("Chat about this note").onClick(() => {
+            execute(`copilot:${COMMAND_IDS.OPEN_FLOATING_AGENT_CHAT}`);
+          });
+        });
+      }
+    }
 
     // Get custom commands
     const commands = getCachedCustomCommands();

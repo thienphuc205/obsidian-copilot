@@ -1,5 +1,6 @@
 import { registerCommands } from "@/commands";
-import { COMMAND_IDS, COMMAND_NAMES } from "@/constants";
+import { FloatingAgentChatModal } from "@/agentMode";
+import { COMMAND_IDS, COMMAND_NAMES, COPILOT_AGENT_ICON_ID } from "@/constants";
 import type CopilotPlugin from "@/main";
 import { MiyoRequestError } from "@/miyo/MiyoClient";
 import { getSettings } from "@/settings/model";
@@ -9,6 +10,14 @@ import { Notice, type Command } from "obsidian";
 
 const mockRequestMiyoIndexRefresh = jest.fn();
 
+// The floating-chat command opens the modal through the `@/agentMode` barrel.
+// The mock exposes only that binding: spreading `requireActual` here would
+// evaluate the whole agent UI graph, whose module scope instantiates
+// `MiyoClient` — a class this suite's partial `@/miyo/MiyoClient` mock does not
+// provide. The barrel's other exports are not exercised by these tests.
+jest.mock("@/agentMode", () => ({
+  FloatingAgentChatModal: jest.fn(),
+}));
 jest.mock("@/commands/CustomCommandChatModal", () => ({
   CustomCommandChatModal: jest.fn(),
 }));
@@ -64,6 +73,89 @@ describe("commands", () => {
       const command = commands.find(({ id }) => id === COMMAND_IDS.NEW_CHAT);
       expect(command?.name).toBe("New Copilot Quick Chat");
       expect(command?.name).not.toBe(COMMAND_NAMES[COMMAND_IDS.NEW_AGENT_CHAT]);
+    });
+
+    it("registers the floating agent chat command only on the desktop runtime, with the right id, name, and icon", () => {
+      jest.mocked(isDesktopRuntime).mockReturnValueOnce(true);
+      const commands: Command[] = [];
+      const plugin = {
+        addCommand: jest.fn((command: Command) => commands.push(command)),
+        app: { workspace: { getActiveFile: jest.fn(() => null) } },
+      } as unknown as CopilotPlugin;
+
+      registerCommands(plugin);
+
+      const command = commands.find(({ id }) => id === COMMAND_IDS.OPEN_FLOATING_AGENT_CHAT);
+      expect(command).toMatchObject({
+        id: COMMAND_IDS.OPEN_FLOATING_AGENT_CHAT,
+        name: COMMAND_NAMES[COMMAND_IDS.OPEN_FLOATING_AGENT_CHAT],
+        icon: COPILOT_AGENT_ICON_ID,
+      });
+      expect(COMMAND_IDS.OPEN_FLOATING_AGENT_CHAT).toBe("open-floating-agent-chat");
+    });
+
+    it("registers no floating agent chat command outside the desktop runtime", () => {
+      const commands: Command[] = [];
+      const plugin = {
+        addCommand: jest.fn((command: Command) => commands.push(command)),
+        app: { workspace: { getActiveFile: jest.fn(() => null) } },
+      } as unknown as CopilotPlugin;
+
+      registerCommands(plugin);
+
+      expect(
+        commands.find(({ id }) => id === COMMAND_IDS.OPEN_FLOATING_AGENT_CHAT)
+      ).toBeUndefined();
+    });
+
+    it("opens the floating agent chat popup with the active Markdown note preloaded into the prompt", async () => {
+      jest.mocked(isDesktopRuntime).mockReturnValueOnce(true);
+      const open = jest.fn();
+      jest
+        .mocked(FloatingAgentChatModal)
+        .mockImplementation(() => ({ open }) as unknown as FloatingAgentChatModal);
+      const commands: Command[] = [];
+      const plugin = {
+        addCommand: jest.fn((command: Command) => commands.push(command)),
+        app: {
+          workspace: {
+            getActiveFile: jest.fn(() => ({ basename: "Deep Dive", extension: "md" })),
+          },
+        },
+      } as unknown as CopilotPlugin;
+
+      registerCommands(plugin);
+      await commands.find(({ id }) => id === COMMAND_IDS.OPEN_FLOATING_AGENT_CHAT)?.callback?.();
+
+      await waitFor(() =>
+        expect(jest.mocked(FloatingAgentChatModal)).toHaveBeenCalledWith(plugin, {
+          prefillPrompt: "Read [[Deep Dive]] and let's discuss it",
+        })
+      );
+      expect(open).toHaveBeenCalledTimes(1);
+    });
+
+    it("opens the floating agent chat popup without a prefill when no note is active", async () => {
+      jest.mocked(isDesktopRuntime).mockReturnValueOnce(true);
+      const open = jest.fn();
+      jest
+        .mocked(FloatingAgentChatModal)
+        .mockImplementation(() => ({ open }) as unknown as FloatingAgentChatModal);
+      const commands: Command[] = [];
+      const plugin = {
+        addCommand: jest.fn((command: Command) => commands.push(command)),
+        app: { workspace: { getActiveFile: jest.fn(() => null) } },
+      } as unknown as CopilotPlugin;
+
+      registerCommands(plugin);
+      await commands.find(({ id }) => id === COMMAND_IDS.OPEN_FLOATING_AGENT_CHAT)?.callback?.();
+
+      await waitFor(() =>
+        expect(jest.mocked(FloatingAgentChatModal)).toHaveBeenCalledWith(plugin, {
+          prefillPrompt: undefined,
+        })
+      );
+      expect(open).toHaveBeenCalledTimes(1);
     });
 
     it("registers no index command when Miyo is disabled (https://github.com/Brevilabs/obsidian-copilot-private/issues/282)", () => {

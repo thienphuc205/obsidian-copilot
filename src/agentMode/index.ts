@@ -28,6 +28,7 @@ import {
 export { AGENT_CHAT_MODE } from "@/constants";
 export { AgentModeChat } from "./ui/AgentModeChat";
 export { default as CopilotAgentView } from "./ui/CopilotAgentView";
+export { FloatingAgentChatModal } from "./ui/FloatingAgentChatModal";
 export {
   useActiveBackendDescriptor,
   useBackendInstallState,
