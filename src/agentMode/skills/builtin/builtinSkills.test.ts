@@ -272,7 +272,18 @@ describe("builtinSkills", () => {
       const plan = planManagedBuiltins({ search: false, documents: false });
       // Stable reference, per the project's referential-stability rule.
       expect(plan.seed).toBe(BUILTIN_SKILLS);
-      expect(plan.prune).toEqual(["miyo-search", "miyo-parse"]);
+      expect(plan.prune).toEqual([
+        ...[
+          "copilot-web-search",
+          "copilot-web-fetch",
+          "copilot-read-pdf",
+          "copilot-youtube-transcript",
+          "copilot-fetch-x",
+          "openartifacts-publish",
+        ],
+        "miyo-search",
+        "miyo-parse",
+      ]);
     });
 
     it("gates search and document parsing independently", () => {
@@ -280,11 +291,25 @@ describe("builtinSkills", () => {
         ...names(BUILTIN_SKILLS),
         "miyo-search",
       ]);
-      expect(planManagedBuiltins({ search: true, documents: false }).prune).toEqual(["miyo-parse"]);
+      expect(planManagedBuiltins({ search: true, documents: false }).prune).toEqual([
+        "copilot-web-search",
+        "copilot-web-fetch",
+        "copilot-read-pdf",
+        "copilot-youtube-transcript",
+        "copilot-fetch-x",
+        "openartifacts-publish",
+        "miyo-parse",
+      ]);
       expect(planManagedBuiltins({ search: false, documents: true }).seed).toContain(
         MIYO_PARSE_SKILL
       );
       expect(planManagedBuiltins({ search: false, documents: true }).prune).toEqual([
+        "copilot-web-search",
+        "copilot-web-fetch",
+        "copilot-read-pdf",
+        "copilot-youtube-transcript",
+        "copilot-fetch-x",
+        "openartifacts-publish",
         "miyo-search",
       ]);
     });
@@ -292,7 +317,16 @@ describe("builtinSkills", () => {
     it("seeds both gated skills without touching the always-on set", () => {
       const plan = planManagedBuiltins({ search: true, documents: true });
       expect(names(plan.seed)).toEqual([...names(BUILTIN_SKILLS), "miyo-search", "miyo-parse"]);
-      expect(plan.prune).toEqual([]);
+      // Retired relay folders are pruned on every pass, even when both Miyo
+      // gates are on and the gated-prune list would otherwise be empty.
+      expect(plan.prune).toEqual([
+        "copilot-web-search",
+        "copilot-web-fetch",
+        "copilot-read-pdf",
+        "copilot-youtube-transcript",
+        "copilot-fetch-x",
+        "openartifacts-publish",
+      ]);
     });
   });
 });

@@ -365,6 +365,26 @@ const ALL_MANAGED_SKILLS: readonly BuiltinSkill[] = [
 ];
 
 /**
+ * Builtins removed from this fork entirely (the Copilot Plus relay skills and
+ * the OpenArtifacts relay publisher). They no longer appear in
+ * {@link ALL_MANAGED_SKILLS}, so the regular prune list can never name them —
+ * yet vaults upgraded from the hosted builds still carry their seeded folders
+ * with SKILL.md files that steer agents toward a license gate and relay
+ * scripts that no longer exist. Listed here by name so every seeding pass
+ * removes them (the seeder only deletes folders carrying the managed
+ * `copilot-builtin-version` marker, so user-authored skills with these names
+ * are never touched).
+ */
+const RETIRED_SKILL_NAMES: readonly string[] = [
+  "copilot-web-search",
+  "copilot-web-fetch",
+  "copilot-read-pdf",
+  "copilot-youtube-transcript",
+  "copilot-fetch-x",
+  "openartifacts-publish",
+];
+
+/**
  * Splits the managed builtins into what to write and what to remove, so the host
  * can't seed a gate without pruning its opposite.
  *
@@ -385,6 +405,9 @@ export function planManagedBuiltins(gates: { search: boolean; documents: boolean
         ];
   return {
     seed,
-    prune: ALL_MANAGED_SKILLS.filter((skill) => !seed.includes(skill)).map((skill) => skill.name),
+    prune: [
+      ...RETIRED_SKILL_NAMES,
+      ...ALL_MANAGED_SKILLS.filter((skill) => !seed.includes(skill)).map((skill) => skill.name),
+    ],
   };
 }
