@@ -171,6 +171,8 @@ function makeDeps(args: {
     } as unknown as ProviderRegistry,
     getSelfHostWebSearchChannel: async () => ({
       url: "http://127.0.0.1:1234/search",
+      searchUrl: "http://127.0.0.1:1234/search",
+      youtubeUrl: "http://127.0.0.1:1234/youtube",
       token: "session-token",
     }),
   };

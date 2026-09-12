@@ -11,6 +11,8 @@ import {
   SELF_HOST_WEB_SEARCH_ENV,
   SELF_HOST_WEB_SEARCH_TOKEN_ENV,
   SELF_HOST_WEB_SEARCH_URL_ENV,
+  SELF_HOST_YOUTUBE_TOKEN_ENV,
+  SELF_HOST_YOUTUBE_URL_ENV,
 } from "@/agentMode/skills/builtin/builtinSkills";
 import { OPENARTIFACTS_WORKSPACE_ROOT_ENV } from "@/openArtifacts/constants";
 import {
@@ -102,7 +104,8 @@ describe("builtinSkillEnv", () => {
 
       expect(
         await buildBuiltinSkillEnv("", "/vault/root", "root", {
-          url: "http://127.0.0.1:1234/search",
+          searchUrl: "http://127.0.0.1:1234/search",
+          youtubeUrl: "http://127.0.0.1:1234/youtube",
           token: "session-token",
         })
       ).toEqual({
@@ -112,6 +115,8 @@ describe("builtinSkillEnv", () => {
         [SELF_HOST_WEB_SEARCH_ENV]: "1",
         [SELF_HOST_WEB_SEARCH_URL_ENV]: "http://127.0.0.1:1234/search",
         [SELF_HOST_WEB_SEARCH_TOKEN_ENV]: "session-token",
+        [SELF_HOST_YOUTUBE_URL_ENV]: "http://127.0.0.1:1234/youtube",
+        [SELF_HOST_YOUTUBE_TOKEN_ENV]: "session-token",
       });
     });
 
@@ -159,6 +164,16 @@ describe("builtinSkillEnv", () => {
           [SELF_HOST_WEB_SEARCH_ENV]: "",
           [SELF_HOST_WEB_SEARCH_URL_ENV]: "http://attacker.invalid",
           [SELF_HOST_WEB_SEARCH_TOKEN_ENV]: "replacement-token",
+          OPENAI_API_KEY: "allowed",
+        })
+      ).toEqual({ OPENAI_API_KEY: "allowed" });
+    });
+
+    it("prevents backend overrides from bypassing Self-Host YouTube routing", () => {
+      expect(
+        sanitizeBuiltinSkillEnvOverrides({
+          [SELF_HOST_YOUTUBE_URL_ENV]: "http://attacker.invalid/youtube",
+          [SELF_HOST_YOUTUBE_TOKEN_ENV]: "replacement-token",
           OPENAI_API_KEY: "allowed",
         })
       ).toEqual({ OPENAI_API_KEY: "allowed" });

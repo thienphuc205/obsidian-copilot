@@ -1,9 +1,11 @@
 import {
   createSelfHostWebSearchAgentBridge,
   hasSelfHostSearchKey,
+  hasSelfHostYoutubeKey,
   selfHostWebSearch,
   type SelfHostWebSearchAgentBridge,
   type SelfHostWebSearchAgentChannel,
+  type Youtube4llmResponse,
 } from "./selfHostServices";
 
 const mockGetSettings = jest.fn();
@@ -57,7 +59,24 @@ function requestAgentSearchChannel(
   channel: Readonly<SelfHostWebSearchAgentChannel>,
   query: string,
   token = channel.token,
-  url = channel.url
+  url = channel.searchUrl
+): Promise<{ status: number; contentType: string | undefined; body: unknown }> {
+  return requestAgentChannel(url, query, token);
+}
+
+function requestAgentYoutubeChannel(
+  channel: Readonly<SelfHostWebSearchAgentChannel>,
+  body: string,
+  token = channel.token,
+  url = channel.youtubeUrl
+): Promise<{ status: number; contentType: string | undefined; body: unknown }> {
+  return requestAgentChannel(url, body, token);
+}
+
+function requestAgentChannel(
+  url: string,
+  body: string,
+  token: string
 ): Promise<{ status: number; contentType: string | undefined; body: unknown }> {
   const http = jest.requireActual<typeof import("node:http")>("node:http");
   return new Promise((resolve, reject) => {
@@ -68,7 +87,7 @@ function requestAgentSearchChannel(
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "text/plain; charset=utf-8",
-          "Content-Length": Buffer.byteLength(query),
+          "Content-Length": Buffer.byteLength(body),
         },
       },
       (response) => {
@@ -87,7 +106,7 @@ function requestAgentSearchChannel(
       }
     );
     request.on("error", reject);
-    request.end(query);
+    request.end(body);
   });
 }
 
@@ -135,6 +154,20 @@ describe("selfHostServices", () => {
     });
   });
 
+  describe("hasSelfHostYoutubeKey()", () => {
+    it("requires the Supadata credential regardless of search provider keys", () => {
+      mockGetSettings.mockReturnValue(
+        providerSettings("firecrawl", { firecrawlApiKey: "fc-key", supadataApiKey: "" })
+      );
+      expect(hasSelfHostYoutubeKey()).toBe(false);
+
+      mockGetSettings.mockReturnValue(
+        providerSettings("firecrawl", { firecrawlApiKey: "", supadataApiKey: "sd-key" })
+      );
+      expect(hasSelfHostYoutubeKey()).toBe(true);
+    });
+  });
+
   describe("createSelfHostWebSearchAgentBridge()", () => {
     const bridges: SelfHostWebSearchAgentBridge[] = [];
 
@@ -146,9 +179,42 @@ describe("selfHostServices", () => {
     function createBridge(
       isModeValid: () => boolean,
       hasSearchKey: () => boolean,
-      search: (query: string) => Promise<{ content: string; citations: string[] }>
+      search: (query: string) => Promise<{ content: string; citations: string[] }>,
+      youtube?: {
+        hasKey: () => boolean;
+        fetch: (url: string) => Promise<Youtube4llmResponse>;
+      }
     ): SelfHostWebSearchAgentBridge {
-      const bridge = createSelfHostWebSearchAgentBridge(isModeValid, hasSearchKey, search);
+      const bridge = createSelfHostWebSearchAgentBridge(
+        isModeValid,
+        hasSearchKey,
+        search,
+        youtube?.hasKey,
+        youtube?.fetch
+      );
+      bridges.push(bridge);
+      return bridge;
+    }
+
+    function youtubeDeps(fetch: (url: string) => Promise<Youtube4llmResponse> = jest.fn()): {
+      hasKey: () => boolean;
+      fetch: (url: string) => Promise<Youtube4llmResponse>;
+    } {
+      return { hasKey: () => true, fetch };
+    }
+
+    function createYoutubeBridge(
+      isModeValid: () => boolean,
+      hasKey: () => boolean,
+      fetch: (url: string) => Promise<Youtube4llmResponse>
+    ): SelfHostWebSearchAgentBridge {
+      const bridge = createSelfHostWebSearchAgentBridge(
+        isModeValid,
+        () => true,
+        jest.fn(),
+        hasKey,
+        fetch
+      );
       bridges.push(bridge);
       return bridge;
     }
@@ -249,12 +315,13 @@ describe("selfHostServices", () => {
       expect(search).not.toHaveBeenCalled();
     });
 
-    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/165 exposes only the search route on the local channel", async () => {
+    it("https://github.com/Brevilabs/obsidian-copilot-private/issues/165 exposes only the search and youtube routes on the local channel", async () => {
       const search = jest.fn();
       const bridge = createBridge(
         () => true,
         () => true,
-        search
+        search,
+        youtubeDeps()
       );
       const channel = await bridge.getChannel();
 
@@ -263,7 +330,7 @@ describe("selfHostServices", () => {
           channel,
           "private query",
           channel.token,
-          channel.url.replace("/search", "/other")
+          channel.searchUrl.replace("/search", "/other")
         )
       ).resolves.toEqual({
         status: 404,
@@ -271,6 +338,159 @@ describe("selfHostServices", () => {
         body: { error: "Not found." },
       });
       expect(search).not.toHaveBeenCalled();
+    });
+
+    describe("/youtube route", () => {
+      it("returns the transcript from the injected youtube provider", async () => {
+        const fetch = jest.fn().mockResolvedValue({
+          response: { transcript: "Welcome to lecture 4 ✅" },
+          elapsed_time_ms: 42,
+        });
+        const bridge = createBridge(
+          () => true,
+          () => true,
+          jest.fn(),
+          youtubeDeps(fetch)
+        );
+        const channel = await bridge.getChannel();
+
+        await expect(
+          requestAgentYoutubeChannel(channel, JSON.stringify({ url: "https://youtu.be/abc" }))
+        ).resolves.toEqual({
+          status: 200,
+          contentType: "application/json; charset=utf-8",
+          body: { response: { transcript: "Welcome to lecture 4 ✅" }, elapsed_time_ms: 42 },
+        });
+        expect(fetch).toHaveBeenCalledWith("https://youtu.be/abc");
+      });
+
+      it("fails closed with a clear message when the Supadata key is missing", async () => {
+        const fetch = jest.fn();
+        const bridge = createYoutubeBridge(
+          () => true,
+          () => false,
+          fetch
+        );
+        const channel = await bridge.getChannel();
+
+        await expect(
+          requestAgentYoutubeChannel(channel, JSON.stringify({ url: "https://youtu.be/abc" }))
+        ).resolves.toEqual({
+          status: 500,
+          contentType: "application/json; charset=utf-8",
+          body: {
+            error: "Add a Supadata API key in Copilot settings to fetch YouTube transcripts.",
+          },
+        });
+        expect(fetch).not.toHaveBeenCalled();
+      });
+
+      it("fails closed when the Self-Host mode gate is off", async () => {
+        const fetch = jest.fn();
+        const bridge = createYoutubeBridge(
+          () => false,
+          () => true,
+          fetch
+        );
+        const channel = await bridge.getChannel();
+
+        await expect(
+          requestAgentYoutubeChannel(channel, JSON.stringify({ url: "https://youtu.be/abc" }))
+        ).resolves.toEqual({
+          status: 500,
+          contentType: "application/json; charset=utf-8",
+          body: { error: "Self-host YouTube transcripts are not available for this session." },
+        });
+        expect(fetch).not.toHaveBeenCalled();
+      });
+
+      it("surfaces an async/processing provider response verbatim and stops", async () => {
+        const fetch = jest
+          .fn()
+          .mockRejectedValue(new Error("Supadata returned async status but no job_id"));
+        const bridge = createBridge(
+          () => true,
+          () => true,
+          jest.fn(),
+          youtubeDeps(fetch)
+        );
+        const channel = await bridge.getChannel();
+
+        await expect(
+          requestAgentYoutubeChannel(channel, JSON.stringify({ url: "https://youtu.be/abc" }))
+        ).resolves.toEqual({
+          status: 500,
+          contentType: "application/json; charset=utf-8",
+          body: { error: "Supadata returned async status but no job_id" },
+        });
+        expect(fetch).toHaveBeenCalledTimes(1);
+      });
+
+      it("rejects a missing or malformed url before dispatch", async () => {
+        const fetch = jest.fn();
+        const bridge = createBridge(
+          () => true,
+          () => true,
+          jest.fn(),
+          youtubeDeps(fetch)
+        );
+        const channel = await bridge.getChannel();
+
+        await expect(requestAgentYoutubeChannel(channel, JSON.stringify({}))).resolves.toEqual({
+          status: 400,
+          contentType: "application/json; charset=utf-8",
+          body: { error: "A non-empty url is required." },
+        });
+        await expect(requestAgentYoutubeChannel(channel, "not json at all")).resolves.toEqual({
+          status: 400,
+          contentType: "application/json; charset=utf-8",
+          body: { error: "A non-empty url is required." },
+        });
+        expect(fetch).not.toHaveBeenCalled();
+      });
+
+      it("rejects another local process without the per-lifecycle token", async () => {
+        const fetch = jest.fn();
+        const bridge = createBridge(
+          () => true,
+          () => true,
+          jest.fn(),
+          youtubeDeps(fetch)
+        );
+        const channel = await bridge.getChannel();
+
+        await expect(
+          requestAgentYoutubeChannel(
+            channel,
+            JSON.stringify({ url: "https://youtu.be/abc" }),
+            "wrong-token"
+          )
+        ).resolves.toEqual({
+          status: 401,
+          contentType: "application/json; charset=utf-8",
+          body: { error: "Unauthorized." },
+        });
+        expect(fetch).not.toHaveBeenCalled();
+      });
+
+      it("keeps the search channel contract intact alongside the youtube route", async () => {
+        const search = jest.fn().mockResolvedValue({ content: "found", citations: [] });
+        const bridge = createBridge(
+          () => true,
+          () => true,
+          search,
+          youtubeDeps()
+        );
+        const channel = await bridge.getChannel();
+
+        expect(channel.searchUrl).toBe(channel.url);
+        await expect(requestAgentSearchChannel(channel, "query")).resolves.toEqual({
+          status: 200,
+          contentType: "application/json; charset=utf-8",
+          body: { content: "found", citations: [] },
+        });
+        expect(search).toHaveBeenCalledWith("query");
+      });
     });
 
     it("https://github.com/Brevilabs/obsidian-copilot-private/issues/165 closes the local channel with its plugin lifecycle", async () => {

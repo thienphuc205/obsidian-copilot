@@ -11,6 +11,8 @@ describe("builtinSkills", () => {
       expect(BUILTIN_SKILLS.map((s) => s.name)).toEqual([
         "research",
         "read-scanned-pdf",
+        "youtube-notes",
+        "read-files",
         "study-quiz",
         "feynman-grade",
         "defense-sim",
@@ -237,6 +239,29 @@ describe("builtinSkills", () => {
       expect(md).toMatch(/skeptical reviewer/i);
       expect(md).toMatch(/critique skeleton/i);
       expect(md).toMatch(/read-scanned-pdf/);
+    });
+
+    it("youtube-notes posts through the tokened local channel and writes into Lectures/", () => {
+      const md = studySkillMd("youtube-notes");
+      expect(md).toContain("COPILOT_SELF_HOST_YOUTUBE_URL");
+      expect(md).toContain("Authorization: Bearer $COPILOT_SELF_HOST_YOUTUBE_TOKEN");
+      expect(md).toMatch(/Lectures\//);
+      expect(md).toMatch(/<Title> \(<YYYY-MM-DD>\)\.md/);
+      expect(md).toMatch(/Questions to self-check/i);
+      expect(md).toMatch(/Supadata key/i);
+      expect(md).toMatch(/study-quiz/);
+    });
+
+    it("read-files extracts office text locally with textutil and video keyframes with ffmpeg", () => {
+      const md = studySkillMd("read-files");
+      expect(md).toMatch(/textutil -convert txt -stdout/);
+      expect(md).toMatch(/word\/document\.xml/);
+      expect(md).toMatch(/<a:t>/);
+      expect(md).toMatch(/ppt\/slides\/slide\*\.xml/);
+      expect(md).toMatch(/brew install ffmpeg/);
+      expect(md).toMatch(/-frames:v 12/);
+      expect(md).toMatch(/LOCAL vision model/i);
+      expect(md).toMatch(/fall back to a cloud service/i);
     });
   });
 

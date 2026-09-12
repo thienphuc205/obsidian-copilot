@@ -280,3 +280,157 @@ report.
 `,
   files: [],
 };
+
+const YOUTUBE_NOTES_VERSION = 1;
+
+export const YOUTUBE_NOTES_SKILL: BuiltinSkill = {
+  name: "youtube-notes",
+  version: YOUTUBE_NOTES_VERSION,
+  enabledAgents: ENABLED_AGENTS,
+  skillMd: String.raw`---
+name: youtube-notes
+description: Turn a shared YouTube lecture into a structured vault note — TL;DR, grouped key points with rough timestamps, definitions, self-check questions, and the source link. Use when the user shares a YouTube URL and wants it studied or turned into notes.
+metadata:
+  copilot-enabled-agents: claude, codex, opencode
+  copilot-builtin-version: "${YOUTUBE_NOTES_VERSION}"
+---
+
+# Turn a lecture into a note
+
+The user shares a YouTube URL (a lecture, talk, or tutorial) and wants it
+studied and captured as a note in their vault.
+
+## 1. Fetch the transcript
+
+Request it through the plugin's local channel with curl. The URL and token come
+from your environment; do not hardcode or guess them.
+
+~~~bash
+curl -sS -X POST "$COPILOT_SELF_HOST_YOUTUBE_URL" \
+  -H "Authorization: Bearer $COPILOT_SELF_HOST_YOUTUBE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "<the YouTube URL the user shared>"}'
+~~~
+
+On success the response JSON is \`{"response": {"transcript": "..."},
+"elapsed_time_ms": ...}\` — read \`response.transcript\`. The transcript passes
+only to the model the user already configured in Copilot; it is not sent
+anywhere else.
+
+## 2. Write the note
+
+Default folder \`Lectures/\` (create it if missing); ask before choosing a
+different location. Filename \`<Title> (<YYYY-MM-DD>).md\`, title from the
+lecture itself, not the URL slug. Structure:
+
+- One-line TL;DR at the top.
+- **Key points** — grouped by theme, with rough timestamps where the transcript
+  gives them (e.g. \`[12:30]\`).
+- **Definitions & terms** — each term with the lecture's own wording.
+- **Questions to self-check** — 3-5 questions, no answers.
+- **Sources** — the YouTube URL.
+
+Ground every point in the transcript; never invent content it does not contain.
+
+## 3. If it fails, stop and tell the user exactly what to configure
+
+Do not retry in a loop.
+
+- The env vars are missing → tell the user to enable Self-Host Mode in Copilot
+  settings (it provides the local transcript channel) and restart the session.
+- The response says the Supadata API key is missing → tell the user to add
+  their Supadata key in Copilot settings (Self-Host section), then retry once.
+- The response says the transcript is processing or returns an async job →
+  report that to the user and stop; do not poll.
+- Any other error → report the error message verbatim and stop.
+
+## Follow-up
+
+After writing the note, offer one follow-up: "want a quiz on this lecture?
+(study-quiz)".
+`,
+  files: [],
+};
+
+const READ_FILES_VERSION = 1;
+
+export const READ_FILES_SKILL: BuiltinSkill = {
+  name: "read-files",
+  version: READ_FILES_VERSION,
+  enabledAgents: ENABLED_AGENTS,
+  skillMd: String.raw`---
+name: read-files
+description: Extract text locally from office files (.docx, .ppt, .pptx) and read keyframes from local video files (mp4/mov/mkv/webm) before answering, so attached material is never skipped. Use whenever the session includes such a file.
+metadata:
+  copilot-enabled-agents: claude, codex, opencode
+  copilot-builtin-version: "${READ_FILES_VERSION}"
+---
+
+# Read office docs and video locally
+
+Extract text from non-Markdown office files LOCALLY (no cloud converters, no
+uploading the file anywhere) before reading them, so quiz/tutor/summary flows
+can treat the extracted text as normal attached material.
+
+## .docx
+
+macOS:
+
+~~~bash
+textutil -convert txt -stdout "<file.docx>"
+~~~
+
+Otherwise, unzip and pull the document body (strip XML tags):
+
+~~~bash
+unzip -p "<file.docx>" word/document.xml | sed -e 's/<[^>]*>/ /g' | tr -s ' '
+~~~
+
+## .ppt / .pptx
+
+Unzip to a temp dir first:
+
+~~~bash
+mkdir -p /tmp/copilot-slides && unzip -o "<file>" -d /tmp/copilot-slides
+~~~
+
+- \`.pptx\`: extract text runs from \`ppt/slides/slide*.xml\` — the \`<a:t>\`
+  elements, in slide order — and emit one "## Slide N" heading per slide, e.g.
+  \`sed -e 's/<[^>]*>/ /g' ppt/slides/slide1.xml\` per slide in numeric order.
+  Slide images exist per slide (slideN.xml references them in
+  ppt/media/); mention you can read those images with vision if the slide text
+  alone looks incomplete.
+- Legacy \`.ppt\`: try \`textutil -convert txt -stdout "<file.ppt>"\` (macOS). If
+  that fails, tell the user no local converter is available for this file and
+  stop; do not fall back to a cloud service.
+
+## Local video files (mp4/mov/mkv/webm)
+
+If \`ffmpeg\` is available, extract a bounded set of keyframes and read them as
+IMAGES with your vision:
+
+~~~bash
+ffmpeg -i "<file>" -vf "fps=1/10" -frames:v 12 -q:v 2 /tmp/copilot-video/frame_%02d.jpg
+~~~
+
+- Cap at 12 frames (\`-frames:v 12\`); tune the interval (\`fps=1/<seconds>\`) to
+  spread them over the video.
+- For long videos, ask the user for the segment (start/duration) BEFORE
+  extracting, and extract only that segment.
+- No ffmpeg → give the one-line install (\`brew install ffmpeg\`) and stop; never
+  install packages yourself.
+
+### Token-saving suggestion (say it, don't block on it)
+
+Reading many frames as images burns tokens on hosted models. When available,
+suggest the user route frame reading through a LOCAL vision model — the OpenCode
+BYOK provider for LM Studio/Ollama, or their configured local chat model — as a
+suggestion, not a blocker.
+
+## After extraction
+
+Treat the extracted text/frames as normal attached material for this session —
+quiz, tutor, summary, and grading flows proceed on it as usual.
+`,
+  files: [],
+};

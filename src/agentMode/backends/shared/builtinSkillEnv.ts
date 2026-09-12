@@ -6,6 +6,8 @@ import {
   SELF_HOST_WEB_SEARCH_ENV,
   SELF_HOST_WEB_SEARCH_TOKEN_ENV,
   SELF_HOST_WEB_SEARCH_URL_ENV,
+  SELF_HOST_YOUTUBE_TOKEN_ENV,
+  SELF_HOST_YOUTUBE_URL_ENV,
 } from "@/agentMode/skills/builtin/builtinSkills";
 import { OPENARTIFACTS_WORKSPACE_ROOT_ENV } from "@/openArtifacts/constants";
 import {
@@ -24,6 +26,8 @@ const PROTECTED_BUILTIN_ENV_KEYS = [
   SELF_HOST_WEB_SEARCH_ENV,
   SELF_HOST_WEB_SEARCH_URL_ENV,
   SELF_HOST_WEB_SEARCH_TOKEN_ENV,
+  SELF_HOST_YOUTUBE_URL_ENV,
+  SELF_HOST_YOUTUBE_TOKEN_ENV,
 ] as const;
 
 /** Frozen empty result so unmanaged spawns don't allocate a fresh object each time. */
@@ -40,8 +44,9 @@ const EMPTY_MANAGED_ENV: Readonly<Record<string, string>> = Object.freeze({});
  *   depending on the agent backend's `PATH`.
  * - **Host review** (`OPENARTIFACTS_WORKSPACE_ROOT_ENV`): owning workspace used to
  *   stage HTML and derive the wrapper's explicit Obsidian CLI vault target.
- * - **Self-host web search**: a mode marker and per-lifecycle loopback channel
- *   route the managed skill back into Obsidian without exposing provider credentials.
+ * - **Self-host skills**: a mode marker and per-lifecycle loopback channel
+ *   (search + YouTube transcript routes) keep managed skills inside Obsidian
+ *   without exposing provider credentials.
  * - **Miyo** (`MIYO_URL`): the user's custom/remote Miyo server URL when set, so
  *   the bundled `miyo` CLI targets their configured service instead of local
  *   loopback discovery (the only way Miyo works on mobile or against a remote
@@ -51,13 +56,18 @@ const EMPTY_MANAGED_ENV: Readonly<Record<string, string>> = Object.freeze({});
  *   managed value reads it anymore.
  * @param workspaceRootAbs Absolute host workspace root used by portable skills.
  * @param vaultName Exact active-vault name used by vault-scoped skills.
- * @param selfHostSearchChannel Plugin-owned endpoint and token for Self-Host search.
+ * @param selfHostSearchChannel Plugin-owned endpoints and token for Self-Host
+ *   skill routes (search and YouTube).
  */
 export async function buildBuiltinSkillEnv(
   clientVersion = "",
   workspaceRootAbs = "",
   vaultName = "",
-  selfHostSearchChannel?: Readonly<{ url: string; token: string }>
+  selfHostSearchChannel?: Readonly<{
+    searchUrl: string;
+    youtubeUrl: string;
+    token: string;
+  }>
 ): Promise<Readonly<Record<string, string>>> {
   const os = requireNodeModule<typeof import("node:os")>("os");
   const settings = getSettings();
@@ -77,8 +87,10 @@ export async function buildBuiltinSkillEnv(
   // https://github.com/Brevilabs/obsidian-copilot-private/issues/165
   if (settings.enableSelfHostMode === true && selfHostSearchChannel) {
     env[SELF_HOST_WEB_SEARCH_ENV] = "1";
-    env[SELF_HOST_WEB_SEARCH_URL_ENV] = selfHostSearchChannel.url;
+    env[SELF_HOST_WEB_SEARCH_URL_ENV] = selfHostSearchChannel.searchUrl;
     env[SELF_HOST_WEB_SEARCH_TOKEN_ENV] = selfHostSearchChannel.token;
+    env[SELF_HOST_YOUTUBE_URL_ENV] = selfHostSearchChannel.youtubeUrl;
+    env[SELF_HOST_YOUTUBE_TOKEN_ENV] = selfHostSearchChannel.token;
   }
 
   // The CLI reads MIYO_URL; bare/local installs leave it empty and fall back to

@@ -4,9 +4,11 @@ import {
   DEFENSE_SIM_SKILL,
   FEYNMAN_GRADE_SKILL,
   PAPER_COMPANION_SKILL,
+  READ_FILES_SKILL,
   READ_SCANNED_PDF_SKILL,
   RESEARCH_SKILL,
   STUDY_QUIZ_SKILL,
+  YOUTUBE_NOTES_SKILL,
 } from "./workflowSkills";
 
 /**
@@ -49,11 +51,17 @@ export const SELF_HOST_WEB_SEARCH_ENV = "COPILOT_SELF_HOST_WEB_SEARCH";
 export const SELF_HOST_WEB_SEARCH_URL_ENV = "COPILOT_SELF_HOST_WEB_SEARCH_URL";
 /** Random bearer token authenticating the owning Agent Chat process. */
 export const SELF_HOST_WEB_SEARCH_TOKEN_ENV = "COPILOT_SELF_HOST_WEB_SEARCH_TOKEN";
+/** Per-lifecycle loopback endpoint for the plugin-owned YouTube transcript route. */
+export const SELF_HOST_YOUTUBE_URL_ENV = "COPILOT_SELF_HOST_YOUTUBE_URL";
+/** Same bearer token as the search channel; the loopback server is shared. */
+export const SELF_HOST_YOUTUBE_TOKEN_ENV = "COPILOT_SELF_HOST_YOUTUBE_TOKEN";
 
 /** All always-seeded plugin-shipped skills, in display order. */
 export const BUILTIN_SKILLS: readonly BuiltinSkill[] = [
   RESEARCH_SKILL,
   READ_SCANNED_PDF_SKILL,
+  YOUTUBE_NOTES_SKILL,
+  READ_FILES_SKILL,
   STUDY_QUIZ_SKILL,
   FEYNMAN_GRADE_SKILL,
   DEFENSE_SIM_SKILL,

@@ -19,7 +19,7 @@ const PARALLEL_OBJECTIVE_MAX_LENGTH = 5000;
 const EXA_SEARCH_URL = "https://api.exa.ai/search";
 const SUPADATA_TRANSCRIPT_URL = "https://api.supadata.ai/v1/transcript";
 /** Bounds agent-controlled input. https://github.com/Brevilabs/obsidian-copilot-private/issues/165 */
-const AGENT_SEARCH_REQUEST_MAX_LENGTH = 64 * 1024;
+const AGENT_REQUEST_MAX_LENGTH = 64 * 1024;
 
 type HttpServer = import("node:http").Server;
 type IncomingMessage = import("node:http").IncomingMessage;
@@ -36,10 +36,15 @@ export interface SelfHostWebSearchResult {
   citations: string[];
 }
 
-/** Address and bearer token for one plugin-owned Agent Chat search channel. */
+/** Address and bearer token for one plugin-owned Agent Chat skill channel. */
 export interface SelfHostWebSearchAgentChannel {
+  /** Loopback search endpoint. Kept as the primary field for the existing env contract. */
   url: string;
+  /** Loopback YouTube transcript endpoint. */
+  youtubeUrl: string;
   token: string;
+  /** Alias of `url` so the original search-only contract keeps compiling. */
+  searchUrl: string;
 }
 
 /** Owns the provider-credential-free local channel used by Agent Chat search scripts. */
@@ -49,16 +54,21 @@ export interface SelfHostWebSearchAgentBridge {
 }
 
 /**
- * Keep provider credentials and entitlement checks inside a CLI-independent plugin channel.
+ * Owns the provider-credential-free local channel used by Agent Chat skill
+ * scripts: `/search` for web search and `/youtube` for YouTube transcripts.
  *
  * @param isModeValid Resolves the live, verified self-host entitlement state.
  * @param hasSearchKey Resolves whether the selected provider has a credential.
  * @param search Runs the configured provider search inside Obsidian.
+ * @param hasYoutubeKey Resolves whether the Supadata credential is configured.
+ * @param youtube Fetches the YouTube transcript inside Obsidian.
  */
 export function createSelfHostWebSearchAgentBridge(
   isModeValid: () => boolean = isSelfHostModeEnabled,
   hasSearchKey: () => boolean = hasSelfHostSearchKey,
-  search: (query: string) => Promise<SelfHostWebSearchResult> = selfHostWebSearch
+  search: (query: string) => Promise<SelfHostWebSearchResult> = selfHostWebSearch,
+  hasYoutubeKey: () => boolean = hasSelfHostYoutubeKey,
+  youtube: (url: string) => Promise<Youtube4llmResponse> = selfHostYoutube4llm
 ): Readonly<SelfHostWebSearchAgentBridge> {
   let server: HttpServer | null = null;
   let channelPromise: Promise<Readonly<SelfHostWebSearchAgentChannel>> | null = null;
@@ -76,6 +86,19 @@ export function createSelfHostWebSearchAgentBridge(
       throw new Error("Add an API key for the selected self-host search provider.");
     }
     return search(query);
+  };
+
+  const runYoutube = async (url: string): Promise<Youtube4llmResponse> => {
+    // Same fail-closed gate as search: without the Supadata credential the
+    // transcript request would otherwise leak into an unauthenticated provider
+    // call or fall back to an agent-native fetch of the video page.
+    if (!isModeValid()) {
+      throw new Error("Self-host YouTube transcripts are not available for this session.");
+    }
+    if (!hasYoutubeKey()) {
+      throw new Error("Add a Supadata API key in Copilot settings to fetch YouTube transcripts.");
+    }
+    return youtube(url);
   };
 
   const startChannel = (): Promise<Readonly<SelfHostWebSearchAgentChannel>> => {
@@ -99,7 +122,7 @@ export function createSelfHostWebSearchAgentBridge(
       };
       rejectChannelStart = rejectStart;
       const nextServer = http.createServer((request, response) => {
-        void handleAgentSearchRequest(request, response, token, runSearch);
+        void handleAgentSkillRequest(request, response, token, runSearch, runYoutube);
       });
       server = nextServer;
       nextServer.once("error", rejectStart);
@@ -111,12 +134,14 @@ export function createSelfHostWebSearchAgentBridge(
         }
         const address = nextServer.address() as import("node:net").AddressInfo;
         nextServer.on("error", (error) => {
-          logError("[AgentMode] Self-host web search channel failed", error);
+          logError("[AgentMode] Self-host skill channel failed", error);
         });
         nextServer.unref();
         resolveStart(
           Object.freeze({
             url: `http://127.0.0.1:${address.port}/search`,
+            searchUrl: `http://127.0.0.1:${address.port}/search`,
+            youtubeUrl: `http://127.0.0.1:${address.port}/youtube`,
             token,
           })
         );
@@ -145,54 +170,81 @@ export function createSelfHostWebSearchAgentBridge(
   });
 }
 
-async function handleAgentSearchRequest(
+type AgentSkillHandler<Body> = (input: string) => Promise<Body>;
+
+/**
+ * Shared guard chain for both loopback skill routes. Binds to loopback, requires
+ * the per-lifecycle token, and accepts only the two known routes so another
+ * vault or local webpage cannot select this plugin instance.
+ * https://github.com/Brevilabs/obsidian-copilot-private/issues/165
+ */
+async function handleAgentSkillRequest(
   request: IncomingMessage,
   response: ServerResponse,
   token: string,
-  search: (query: string) => Promise<SelfHostWebSearchResult>
+  search: AgentSkillHandler<SelfHostWebSearchResult>,
+  youtube: AgentSkillHandler<Youtube4llmResponse>
 ): Promise<void> {
-  // Bind to loopback, require a per-lifecycle token, and accept only one route
-  // so another vault or local webpage cannot select this plugin instance.
-  // https://github.com/Brevilabs/obsidian-copilot-private/issues/165
-  if (request.method !== "POST" || request.url !== "/search") {
-    writeAgentSearchResponse(response, 404, { error: "Not found." });
+  const route = request.method === "POST" ? (request.url ?? "") : "";
+  if (route !== "/search" && route !== "/youtube") {
+    writeAgentSkillResponse(response, 404, { error: "Not found." });
     return;
   }
   if (request.headers.authorization !== `Bearer ${token}`) {
-    writeAgentSearchResponse(response, 401, { error: "Unauthorized." });
+    writeAgentSkillResponse(response, 401, { error: "Unauthorized." });
     return;
   }
 
   try {
-    const query = await readAgentSearchRequestBody(request);
-    if (!query.trim()) {
-      writeAgentSearchResponse(response, 400, { error: "A non-empty query is required." });
+    const body = await readAgentSkillRequestBody(request);
+    if (route === "/search") {
+      if (!body.trim()) {
+        writeAgentSkillResponse(response, 400, { error: "A non-empty query is required." });
+        return;
+      }
+      writeAgentSkillResponse(response, 200, await search(body));
       return;
     }
-    writeAgentSearchResponse(response, 200, await search(query));
+    let parsedUrl: unknown;
+    try {
+      parsedUrl = JSON.parse(body);
+    } catch {
+      parsedUrl = undefined;
+    }
+    const url =
+      typeof parsedUrl === "object" &&
+      parsedUrl !== null &&
+      typeof (parsedUrl as { url?: unknown }).url === "string"
+        ? (parsedUrl as { url: string }).url
+        : "";
+    if (!url.trim()) {
+      writeAgentSkillResponse(response, 400, { error: "A non-empty url is required." });
+      return;
+    }
+    writeAgentSkillResponse(response, 200, await youtube(url));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const status = message === "Request body is too large." ? 413 : 500;
-    writeAgentSearchResponse(response, status, { error: message });
+    writeAgentSkillResponse(response, status, { error: message });
   }
 }
 
-async function readAgentSearchRequestBody(request: IncomingMessage): Promise<string> {
+async function readAgentSkillRequestBody(request: IncomingMessage): Promise<string> {
   request.setEncoding("utf8");
   let body = "";
   for await (const chunk of request) {
     body += chunk;
-    if (body.length > AGENT_SEARCH_REQUEST_MAX_LENGTH) {
+    if (body.length > AGENT_REQUEST_MAX_LENGTH) {
       throw new Error("Request body is too large.");
     }
   }
   return body;
 }
 
-function writeAgentSearchResponse(
+function writeAgentSkillResponse(
   response: ServerResponse,
   status: number,
-  body: SelfHostWebSearchResult | { error: string }
+  body: SelfHostWebSearchResult | Youtube4llmResponse | { error: string }
 ): void {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
@@ -266,6 +318,15 @@ export function hasSelfHostSearchKey(): boolean {
     default:
       return !!settings.firecrawlApiKey;
   }
+}
+
+/**
+ * Whether the Supadata credential for YouTube transcripts is configured.
+ * Distinct from the search keys: `/youtube` never accepts another provider's
+ * credential.
+ */
+export function hasSelfHostYoutubeKey(): boolean {
+  return !!getSettings().supadataApiKey;
 }
 
 /**
